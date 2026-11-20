@@ -77,17 +77,19 @@ The heart of the application. Contains business data models and the abstract con
 from typing import Protocol, runtime_checkable
 from domain.entities import Item, ProcessingResult
 
+
 @runtime_checkable
 class ItemProvider(Protocol):
     """Port for fetching items from a data source."""
-    def fetch_item(self, item_id: str) -> Item:
-        ...
+
+    def fetch_item(self, item_id: str) -> Item: ...
+
 
 @runtime_checkable
 class ResultPublisher(Protocol):
     """Port for publishing processing results."""
-    def publish(self, result: ProcessingResult) -> None:
-        ...
+
+    def publish(self, result: ProcessingResult) -> None: ...
 ```
 
 ---
@@ -108,10 +110,12 @@ from domain.entities import Item, ProcessingResult
 from domain.protocols import ItemProvider, ResultPublisher
 from domain.exceptions import ItemNotFoundError
 
+
 @dataclass(frozen=True)
 class ProcessItemCommand:
     item_id: str
     dry_run: bool = False
+
 
 class ProcessItemUseCase:
     def __init__(self, provider: ItemProvider, publisher: ResultPublisher) -> None:
@@ -145,8 +149,10 @@ import httpx
 from domain.entities import Item
 from domain.exceptions import ItemNotFoundError
 
+
 class HttpItemProvider:
     """Concrete adapter satisfying domain.protocols.ItemProvider."""
+
     def __init__(self, base_url: str, timeout: float = 10.0) -> None:
         self._base_url = base_url
         self._timeout = timeout
@@ -192,11 +198,13 @@ from application.use_cases.process_item import ProcessItemUseCase, ProcessItemCo
 console = Console()
 app = typer.Typer()
 
+
 def build_process_item_use_case() -> ProcessItemUseCase:
     """Factory wiring dependencies together at startup."""
     provider = HttpItemProvider(base_url="https://api.example.com")
     publisher = ConsoleResultPublisher()
     return ProcessItemUseCase(provider=provider, publisher=publisher)
+
 
 @app.command()
 def process(item_id: str, dry_run: bool = False) -> None:
@@ -228,12 +236,14 @@ class FakeItemProvider:
     def fetch_item(self, item_id: str) -> Item:
         return self.items.get(item_id)
 
+
 class FakeResultPublisher:
     def __init__(self) -> None:
         self.published = []
 
     def publish(self, result: ProcessingResult) -> None:
         self.published.append(result)
+
 
 def test_process_item_success():
     provider = FakeItemProvider({"123": Item(id="123", title="Test")})

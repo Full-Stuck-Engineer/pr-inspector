@@ -71,9 +71,10 @@ Define the contract once; extend by creating new adapter classes without alterin
 ```python
 from typing import Protocol
 
+
 class LLMProvider(Protocol):
-    def complete(self, prompt: str) -> str:
-        ...
+    def complete(self, prompt: str) -> str: ...
+
 
 # Open for extension: add new classes without touching existing use cases
 class OpenAIProvider:
@@ -81,10 +82,12 @@ class OpenAIProvider:
         # implementation
         ...
 
+
 class OllamaProvider:
     def complete(self, prompt: str) -> str:
         # implementation
         ...
+
 
 class ModelRunner:
     def __init__(self, provider: LLMProvider) -> None:
@@ -112,6 +115,7 @@ class ModelRunner:
 ```python
 from domain.exceptions import ProviderConnectionError
 
+
 class ThirdPartyAdapter:
     def fetch(self, resource_id: str) -> Resource:
         try:
@@ -133,6 +137,7 @@ class ThirdPartyAdapter:
 # BAD: A single giant interface forcing all adapters to implement everything
 from abc import ABC, abstractmethod
 
+
 class Repository(ABC):
     @abstractmethod
     def read(self, id: str): ...
@@ -152,18 +157,20 @@ In Python, prefer small, 1-2 method `Protocol`s (following the Unix philosophy).
 ```python
 from typing import Protocol
 
+
 class ItemReader(Protocol):
-    def get_by_id(self, item_id: str) -> Item | None:
-        ...
+    def get_by_id(self, item_id: str) -> Item | None: ...
+
 
 class ItemWriter(Protocol):
-    def save(self, item: Item) -> None:
-        ...
+    def save(self, item: Item) -> None: ...
+
 
 # A use case that only reads only needs ItemReader
 class GetItemUseCase:
     def __init__(self, reader: ItemReader) -> None:
         self._reader = reader
+
 
 # A use case that needs both can combine them
 class SyncItemUseCase:
@@ -183,6 +190,7 @@ class SyncItemUseCase:
 # BAD: High-level business logic is directly coupled to a concrete SDK
 import requests
 
+
 class ProcessPaymentUseCase:
     def execute(self, amount: float):
         # Hardcoded low-level dependency
@@ -199,9 +207,10 @@ class ProcessPaymentUseCase:
 # 1. Abstraction in Domain / Application
 from typing import Protocol
 
+
 class PaymentGateway(Protocol):
-    def charge(self, amount_cents: int) -> str:
-        ...
+    def charge(self, amount_cents: int) -> str: ...
+
 
 # 2. High-level Use Case depends on the abstraction
 class ProcessPaymentUseCase:
@@ -210,6 +219,7 @@ class ProcessPaymentUseCase:
 
     def execute(self, amount_cents: int) -> str:
         return self._gateway.charge(amount_cents)
+
 
 # 3. Low-level Infrastructure Adapter implements the abstraction
 class StripePaymentAdapter:
