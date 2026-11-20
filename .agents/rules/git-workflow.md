@@ -19,23 +19,28 @@ All development work, branch management, commit practices, and pull requests in 
 
 > **Every phase has a dedicated, permanent branch for educational and reference purposes.**
 
-* The project evolves across 4 phases: `phase-1`, `phase-2`, `phase-3`, and `phase-4`.
-* **Branch Lifecycles:**
-  * When starting work on a phase, create a permanent branch from `main`:
-    ```bash
-    git checkout -b phase-1 main
-    git push -u origin phase-1
-    ```
-  * Individual feature/issue branches branch off the active phase branch:
-    ```bash
-    git checkout -b issue-1-diff-extractor phase-1
-    ```
-  * Pull Requests for individual issues target the phase branch:
-    ```bash
-    gh pr create --base phase-1
-    ```
-  * When an entire phase is complete, a milestone PR merges `phase-N` into `main`.
-  * **Critical:** The `phase-N` branch is **never deleted**. It remains permanently on the remote so anyone can checkout that specific phase snapshot (`git checkout phase-1`).
+The project evolves across 4 chronological, descriptive milestone branches:
+1. `phase/01-diff-cli` — Lightweight diff-only CLI with Pydantic schemas & telemetry.
+2. `phase/02-codebase-rag` — Codebase-aware RAG, hybrid search & reranking.
+3. `phase/03-agent-evals` — Agentic tool loop, distributed tracing & golden evals.
+4. `phase/04-production` — Docker Compose, resilient fallbacks & CI regression gating.
+
+### Branch Lifecycles & Rules
+* **Starting a Phase:** Create and push the permanent phase branch from `main`:
+  ```bash
+  git checkout -b phase/01-diff-cli main
+  git push -u origin phase/01-diff-cli
+  ```
+* **Feature Branches:** Individual feature/issue branches branch off the active phase branch:
+  ```bash
+  git checkout -b issue-1-diff-extractor phase/01-diff-cli
+  ```
+* **Pull Requests:** PRs for individual issues target the phase branch:
+  ```bash
+  gh pr create --base phase/01-diff-cli
+  ```
+* **Milestone Completion:** When an entire phase is complete, a milestone PR merges `phase/0X-...` into `main`.
+* **Critical:** The `phase/0X-...` branch is **never deleted**. It remains permanently on the remote so anyone can checkout that specific phase snapshot (e.g. `git checkout phase/01-diff-cli`).
 
 ---
 

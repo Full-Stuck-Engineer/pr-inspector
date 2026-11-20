@@ -5,7 +5,7 @@ description: Step-by-step GitHub CLI and Git development playbook. Use when crea
 
 # Git & GitHub Development Workflow Playbook
 
-This skill provides the actionable command-line procedures for executing the project's Issue-Driven Development, permanent phase branching, and atomic commit practices using the GitHub CLI (`gh`) and `git`.
+This skill provides actionable command-line procedures for executing the project's Issue-Driven Development, permanent phase branching, and atomic commit practices using the GitHub CLI (`gh`) and `git`.
 
 ---
 
@@ -53,7 +53,13 @@ Record the generated issue number (e.g. `#1`).
 
 ---
 
-## 2. Phase & Feature Branch Management
+## 2. Permanent Phase & Feature Branch Management
+
+The 4 milestone branches are:
+1. `phase/01-diff-cli`
+2. `phase/02-codebase-rag`
+3. `phase/03-agent-evals`
+4. `phase/04-production`
 
 ### Step 2.1: Initialize Permanent Phase Branch (Once per phase)
 When starting a new phase, branch off `main` and push to remote:
@@ -63,15 +69,15 @@ git checkout main
 git pull origin main
 
 # Create and push permanent phase branch
-git checkout -b phase-1 main
-git push -u origin phase-1
+git checkout -b phase/01-diff-cli main
+git push -u origin phase/01-diff-cli
 ```
 
 ### Step 2.2: Create Feature / Issue Branch
 Every issue gets its own feature branch created off the active phase branch:
 ```bash
 # Branch name format: issue-<number>-<short-description>
-git checkout -b issue-1-domain-diff-protocols phase-1
+git checkout -b issue-1-domain-diff-protocols phase/01-diff-cli
 ```
 
 ---
@@ -130,7 +136,7 @@ git push -u origin HEAD
 
 # Create Pull Request targeting the active phase branch
 gh pr create \
-  --base phase-1 \
+  --base phase/01-diff-cli \
   --title "[Phase 1] Implement Core Domain Entities & Git Diff Protocols" \
   --body "## Summary
 Brief description of the changes made.
@@ -156,7 +162,7 @@ gh pr diff <pr_number>
 ### Dogfooding `pr-inspector` (Phase 1+)
 Once `pr-inspector` is built, run it against the feature branch:
 ```bash
-uv run pr-inspector review --target-ref phase-1
+uv run pr-inspector review --target-ref phase/01-diff-cli
 ```
 
 ### Merging Feature PR into Phase Branch
@@ -164,16 +170,16 @@ uv run pr-inspector review --target-ref phase-1
 gh pr merge <pr_number> --squash --delete-branch
 ```
 
-*Note: The feature branch is deleted upon merge, but the **`phase-1` branch remains permanently active**.*
+*Note: The feature branch is deleted upon merge, but the **`phase/01-diff-cli` branch remains permanently active on remote**.*
 
 ---
 
 ## 7. Milestone Merge: Phase Completion
 
-When all issues for a phase are merged into `phase-N`:
-1. Open a Milestone PR from `phase-N` into `main`:
+When all issues for a phase are merged into the phase branch:
+1. Open a Milestone PR from `phase/0X-...` into `main`:
    ```bash
-   gh pr create --base main --head phase-1 --title "Milestone: Complete Phase 1 - Automated PR Review CLI"
+   gh pr create --base main --head phase/01-diff-cli --title "Milestone: Complete Phase 1 - Automated PR Review CLI"
    ```
 2. Merge the Milestone PR into `main`.
-3. **DO NOT delete `phase-N`**. Ensure `phase-N` remains permanently pushed on GitHub as an educational snapshot.
+3. **DO NOT delete `phase/0X-...`**. Ensure the branch remains permanently on GitHub as an educational snapshot.
