@@ -8,7 +8,7 @@ from rich.console import Console
 
 from pr_inspector import __version__
 from pr_inspector.application.use_cases.review_diff import ReviewDiffUseCase
-from pr_inspector.domain.entities import RiskLevel
+from pr_inspector.domain.entities import RISK_ORDER, RiskLevel
 from pr_inspector.domain.exceptions import PRInspectorError
 from pr_inspector.infrastructure.git.diff_extractor import GitCliDiffProvider
 from pr_inspector.infrastructure.llm.openai_client import OpenAICompatibleLLMReviewer
@@ -21,13 +21,6 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
-
-RISK_ORDER: dict[RiskLevel, int] = {
-    RiskLevel.LOW: 1,
-    RiskLevel.MEDIUM: 2,
-    RiskLevel.HIGH: 3,
-    RiskLevel.CRITICAL: 4,
-}
 
 
 def version_callback(value: bool) -> None:
