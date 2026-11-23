@@ -62,6 +62,19 @@ uv run pr-inspector review --output review-report.json
 uv run pr-inspector review --output review-report.md
 ```
 
+### Large Diffs (`--max-input-tokens`)
+A large diff is split into batches, each batch is reviewed in its own request, and the results are merged into one report. Whole files are kept together where possible; a file bigger than the ceiling is split between hunks, never inside one, so reported line numbers stay exact.
+```bash
+# Default ceiling is 8000 tokens of diff per request
+uv run pr-inspector review --max-input-tokens 6000
+
+# Or set it once for the shell
+export PR_INSPECTOR_MAX_INPUT_TOKENS=6000
+```
+A single hunk larger than the ceiling, typically a very large new file, is still sent whole. If any batch fails, the whole review fails: a partially reviewed diff must never pass the `--fail-on` gate.
+
+Ollama defaults to a 4k-token context window on machines with 16 GB of memory or less. Either start the server with a larger window (`OLLAMA_CONTEXT_LENGTH=16384 ollama serve`) or lower `--max-input-tokens` to fit the window you have.
+
 ### CI/CD Gating (`--fail-on`)
 Block broken pull requests in CI pipelines by exiting with non-zero code on risk thresholds:
 ```bash
