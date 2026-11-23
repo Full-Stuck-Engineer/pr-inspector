@@ -112,6 +112,12 @@ class OpenAICompatibleLLMReviewer:
         exponential backoff and jitter — a single 429 from a shared endpoint
         should not fail the whole review. Other 4xx errors are the caller's
         mistake (bad key, unsupported parameter) and fail immediately.
+
+        ``LengthFinishReasonError`` never reaches the ``finish_reason`` check
+        in ``review``: the SDK raises it instead of returning a completion,
+        so it is wrapped here. The remaining ``OpenAIError`` fallback catches
+        the rest of the SDK's error surface (content-filter refusals, response
+        validation) so nothing escapes as a raw traceback.
         """
         last_exc: Exception | None = None
         for attempt in range(MAX_ATTEMPTS):
@@ -122,12 +128,19 @@ class OpenAICompatibleLLMReviewer:
                     response_format=PRReviewResult,
                     temperature=0.0,
                 )
+            except openai.LengthFinishReasonError as exc:
+                raise ReviewExecutionError(
+                    "LLM response was truncated (finish_reason='length'). "
+                    "Retry with a smaller diff or fewer files."
+                ) from exc
             except RETRYABLE_ERRORS as exc:
                 last_exc = exc
             except openai.APIStatusError as exc:
                 if exc.status_code < 500:
                     raise ReviewExecutionError(f"LLM API request failed: {exc}") from exc
                 last_exc = exc
+            except openai.OpenAIError as exc:
+                raise ReviewExecutionError(f"LLM API request failed: {exc}") from exc
 
             if attempt < MAX_ATTEMPTS - 1:
                 backoff = (2**attempt) * (1 + random.random() * 0.1)

@@ -166,3 +166,68 @@ class TestTruncation:
         ):
             with pytest.raises(ReviewExecutionError, match="failed to parse"):
                 reviewer.review([FileDiff(file_path="a.py")])
+
+
+class TestSdkTruncationError:
+    """The SDK raises LengthFinishReasonError instead of returning a
+    completion when the token ceiling is hit — the finish_reason check in
+    review() never sees it. These tests exercise the real exception path
+    that the mocked-return-value tests above cannot reach."""
+
+    def test_sdk_truncation_error_is_wrapped(self):
+        reviewer = _reviewer()
+        exc = openai.LengthFinishReasonError(
+            completion=_completion(finish_reason="length", omit_parsed=True)
+        )
+        with patch.object(
+            reviewer.client.beta.chat.completions,
+            "parse",
+            side_effect=exc,
+        ):
+            with pytest.raises(ReviewExecutionError, match="truncated"):
+                reviewer.review([FileDiff(file_path="a.py")])
+
+    def test_sdk_truncation_error_is_not_retried(self):
+        """Truncation is deterministic: retrying the same diff cannot help."""
+        reviewer = _reviewer()
+        exc = openai.LengthFinishReasonError(
+            completion=_completion(finish_reason="length", omit_parsed=True)
+        )
+        with patch.object(
+            reviewer.client.beta.chat.completions,
+            "parse",
+            side_effect=exc,
+        ) as mock_parse:
+            with pytest.raises(ReviewExecutionError, match="truncated"):
+                reviewer.review([FileDiff(file_path="a.py")])
+
+        assert mock_parse.call_count == 1
+
+
+class TestUnexpectedSdkErrors:
+    """Every remaining OpenAIError must surface as ReviewExecutionError,
+    never as a raw traceback."""
+
+    def test_content_filter_refusal_is_wrapped(self):
+        reviewer = _reviewer()
+        with patch.object(
+            reviewer.client.beta.chat.completions,
+            "parse",
+            side_effect=openai.ContentFilterFinishReasonError(),
+        ):
+            with pytest.raises(ReviewExecutionError, match="LLM API request failed"):
+                reviewer.review([FileDiff(file_path="a.py")])
+
+    def test_response_validation_error_is_wrapped(self):
+        reviewer = _reviewer()
+        response = MagicMock()
+        response.status_code = 200
+        with patch.object(
+            reviewer.client.beta.chat.completions,
+            "parse",
+            side_effect=openai.APIResponseValidationError(
+                message="did not match schema", response=response, body=None
+            ),
+        ):
+            with pytest.raises(ReviewExecutionError, match="LLM API request failed"):
+                reviewer.review([FileDiff(file_path="a.py")])
