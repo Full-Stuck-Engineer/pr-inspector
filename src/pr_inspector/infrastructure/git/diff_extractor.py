@@ -1,5 +1,6 @@
 """Git CLI adapter for extracting, filtering, and parsing unified diffs."""
 
+import ast
 import re
 import subprocess
 from fnmatch import fnmatch
@@ -32,6 +33,88 @@ DEFAULT_IGNORED_PATTERNS: tuple[str, ...] = (
 )
 
 HUNK_HEADER_REGEX = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
+
+
+def _decode_git_quoted_path(token: str) -> str:
+    """Decode a git-quoted path token into its real UTF-8 text.
+
+    Git quotes a path when it contains non-ASCII bytes and escapes each byte
+    in octal, e.g. ``"b/caf\\303\\251.py"`` for ``b/café.py``. The escapes are
+    byte values, so the octal is decoded to Latin-1 first and then re-encoded
+    as UTF-8.
+    """
+    try:
+        decoded = ast.literal_eval(token)
+    except (ValueError, SyntaxError):
+        return token
+    if not isinstance(decoded, str):
+        return token
+    try:
+        return decoded.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return decoded
+
+
+def _strip_path_prefix(path: str) -> str:
+    """Remove the ``a/`` or ``b/`` prefix git puts on diff paths."""
+    for prefix in ("a/", "b/"):
+        if path.startswith(prefix):
+            return path[len(prefix) :]
+    return path
+
+
+def _parse_path_line(line: str, marker: str) -> str | None:
+    """Extract the path from a ``---``/``+++`` diff line.
+
+    Two shapes must be handled:
+
+    * unquoted paths that contain spaces are terminated by a tab, because the
+      path itself would otherwise be ambiguous::
+
+          --- a/my dir/app.py\\t
+
+    * quoted paths are unambiguous on their own and carry no tab, and their
+      non-ASCII bytes are octal-escaped::
+
+          --- "a/caf\\303\\251.py"
+    """
+    if not line.startswith(marker):
+        return None
+
+    rest = line[len(marker) :].strip()
+    if not rest:
+        return None
+
+    if rest.startswith('"'):
+        closing = rest.find('"', 1)
+        if closing == -1:
+            return None
+        token = rest[: closing + 1]
+        return _strip_path_prefix(_decode_git_quoted_path(token))
+
+    # Tab-terminated: everything before the tab is the path.
+    path = rest.split("\t", 1)[0].strip()
+    if not path:
+        return None
+    if path == "/dev/null":
+        return None
+    return _strip_path_prefix(path)
+
+
+def _parse_header_pair_with_spaces(payload: str) -> tuple[str | None, str | None]:
+    """Split an unquoted ``diff --git`` payload into two paths.
+
+    The header has no delimiter when a path contains spaces, so this is
+    inherently ambiguous. Git disambiguates by construction: both paths are
+    identical except for the ``a/``/``b/`` prefix (or differ only at a rename).
+    Splitting on the last `` b/`` occurrence covers the common case.
+    """
+    idx = payload.rfind(" b/")
+    if idx == -1:
+        return None, None
+    old_part = payload[:idx].strip()
+    new_part = payload[idx + 1 :].strip()
+    return _strip_path_prefix(old_part), _strip_path_prefix(new_part)
 
 
 class GitCliDiffProvider:
@@ -101,17 +184,16 @@ class GitCliDiffProvider:
 
             lines = raw_file.splitlines()
             header_line = lines[0]
-            # Format: a/path/to/file b/path/to/file
-            paths = header_line.split(" ")
-            if len(paths) < 2:
+            old_path, new_path = self._resolve_paths(header_line, lines)
+            if old_path is None and new_path is None:
                 continue
 
-            old_path = paths[0].removeprefix("a/")
-            new_path = paths[1].removeprefix("b/")
-
             # Ignore binary files or noise files
-            if self.should_ignore_file(new_path) or any(
-                "Binary files differ" in line for line in lines[:10]
+            target_path = new_path or old_path
+            if (
+                target_path is None
+                or self.should_ignore_file(target_path)
+                or any("Binary files differ" in line for line in lines[:10])
             ):
                 continue
 
@@ -121,7 +203,7 @@ class GitCliDiffProvider:
             hunks = self._parse_hunks(lines)
             file_diffs.append(
                 FileDiff(
-                    file_path=new_path if not is_deleted else old_path,
+                    file_path=new_path or target_path,
                     old_path=old_path if not is_new else None,
                     is_new=is_new,
                     is_deleted=is_deleted,
@@ -130,6 +212,63 @@ class GitCliDiffProvider:
             )
 
         return file_diffs
+
+    @staticmethod
+    def _resolve_paths(header_line: str, lines: list[str]) -> tuple[str | None, str | None]:
+        """Determine a file's old and new path from its diff section.
+
+        The ``---``/``+++`` lines are the authoritative source: git terminates
+        an unquoted path containing spaces with a tab, and octal-escapes a
+        non-ASCII one inside quotes. Only when those lines are absent (binary
+        diffs, renames with no hunks) does the ``diff --git`` header serve as
+        the fallback.
+        """
+        old_path: str | None = None
+        new_path: str | None = None
+
+        for line in lines[:10]:
+            if old_path is None and line.startswith("--- "):
+                old_path = _parse_path_line(line, "--- ")
+                continue
+            if new_path is None and line.startswith("+++ "):
+                new_path = _parse_path_line(line, "+++ ")
+                break
+
+        if old_path is None and new_path is None:
+            return GitCliDiffProvider._parse_header_paths(header_line)
+
+        # A new file shows /dev/null on the old side; a deleted file the reverse.
+        return old_path, new_path or old_path
+
+    @staticmethod
+    def _parse_header_paths(header_line: str) -> tuple[str | None, str | None]:
+        """Fallback parser for the ``diff --git`` header line.
+
+        The header has no unambiguous delimiter when a path contains spaces —
+        git relies on the ``---``/``+++`` lines for that. This parser is used
+        only for sections that have no such lines, so it handles the common
+        single-token case and git's quoted form for non-ASCII paths.
+        """
+        payload = header_line.removeprefix("diff --git ")
+
+        tokens = payload.split("\t")
+        if len(tokens) == 2:
+            return _strip_path_prefix(tokens[0]), _strip_path_prefix(tokens[1])
+
+        if payload.startswith('"'):
+            closing = payload.find('"', 1)
+            if closing == -1:
+                return None, None
+            first = payload[: closing + 1]
+            remainder = payload[closing + 1 :].strip()
+            if not remainder.startswith('"'):
+                return None, None
+            return (
+                _strip_path_prefix(_decode_git_quoted_path(first)),
+                _strip_path_prefix(_decode_git_quoted_path(remainder)),
+            )
+
+        return _parse_header_pair_with_spaces(payload)
 
     def _parse_hunks(self, lines: list[str]) -> list[DiffHunk]:
         hunks: list[DiffHunk] = []
