@@ -32,7 +32,8 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-## Author
+## Authors
 
 - **Anthony Febrian** - [@anthonyfebrian](https://github.com/anthonyfebrian)
+- **Nadiv** - [@nadiv](https://github.com/nadiv)
 
