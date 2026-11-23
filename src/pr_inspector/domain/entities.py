@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class RiskLevel(StrEnum):
@@ -14,6 +14,15 @@ class RiskLevel(StrEnum):
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
+
+
+# Severity ordering, used to compare risk levels ordinally.
+RISK_ORDER: dict[RiskLevel, int] = {
+    RiskLevel.LOW: 1,
+    RiskLevel.MEDIUM: 2,
+    RiskLevel.HIGH: 3,
+    RiskLevel.CRITICAL: 4,
+}
 
 
 class ReviewIssue(BaseModel):
@@ -33,6 +42,25 @@ class PRReviewResult(BaseModel):
     summary: str = Field(description="High-level assessment of the pull request changes")
     risk_level: RiskLevel = Field(description="Aggregated risk severity")
     issues: list[ReviewIssue] = Field(default_factory=list, description="List of identified issues")
+
+    @model_validator(mode="after")
+    def _align_risk_level_with_issues(self) -> "PRReviewResult":
+        """Keep ``risk_level`` consistent with the issues it aggregates.
+
+        ``risk_level`` drives the ``--fail-on`` exit-code contract, so it must
+        never be lower than the severity of the issues that were reported: a
+        critical finding under a LOW risk level would let a broken pull request
+        pass CI. The model sets both fields independently, so the risk level is
+        corrected upwards here rather than rejected — a live model that
+        under-reports its own severity should not fail the whole review.
+        """
+        if not self.issues:
+            return self
+
+        highest = max(self.issues, key=lambda issue: RISK_ORDER[issue.severity]).severity
+        if RISK_ORDER[self.risk_level] < RISK_ORDER[highest]:
+            self.risk_level = highest
+        return self
 
 
 @dataclass(frozen=True)
