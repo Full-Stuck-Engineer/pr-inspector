@@ -143,7 +143,9 @@ def review(
         result, telemetry = use_case.execute(target_ref=target_ref, staged=staged)
 
         if json_output:
-            console.print(result.model_dump_json(indent=2))
+            # Raw text, not console.print: Rich would wrap long lines inside JSON strings
+            # and strip markup-like tokens, so the output would no longer parse.
+            typer.echo(result.model_dump_json(indent=2))
         else:
             render_review_dashboard(console, result, telemetry)
 
