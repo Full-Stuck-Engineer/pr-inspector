@@ -1,14 +1,20 @@
 """OpenAI-compatible LLM adapter for structured code reviews."""
 
 import os
+import random
 import time
 from datetime import UTC, datetime
 
 import openai
 from openai import OpenAI
+from openai.types.chat import ParsedChatCompletion
 
 from pr_inspector.domain.entities import FileDiff, PRReviewResult, TelemetryRecord
 from pr_inspector.domain.exceptions import ReviewExecutionError
+
+# Transient failures worth retrying: rate limits, timeouts, dropped connections.
+RETRYABLE_ERRORS = (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError)
+MAX_ATTEMPTS = 3
 
 REVIEW_SYSTEM_PROMPT = """\
 You are a Principal Software Engineer and Security Auditor performing an automated code review.
@@ -66,43 +72,80 @@ class OpenAICompatibleLLMReviewer:
         if not diff_text.strip():
             diff_text = "No code hunk changes found in diff."
 
+        messages = [
+            {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Review the following code diff:\n\n{diff_text}"},
+        ]
+
         start_time = time.perf_counter()
+        completion = self._call_with_retries(messages)
+        latency_ms = (time.perf_counter() - start_time) * 1000
 
-        try:
-            completion = self.client.beta.chat.completions.parse(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": f"Review the following code diff:\n\n{diff_text}",
-                    },
-                ],
-                response_format=PRReviewResult,
-                temperature=0.0,
-            )
-            latency_ms = (time.perf_counter() - start_time) * 1000
-
-            parsed_result = completion.choices[0].message.parsed
-            if parsed_result is None:
-                raise ReviewExecutionError("LLM response failed to parse into PRReviewResult")
-
-            prompt_tokens = completion.usage.prompt_tokens if completion.usage else 0
-            completion_tokens = completion.usage.completion_tokens if completion.usage else 0
-
-            telemetry = TelemetryRecord(
-                model=self.model,
-                input_tokens=prompt_tokens,
-                output_tokens=completion_tokens,
-                latency_ms=round(latency_ms, 2),
-                timestamp=datetime.now(UTC).isoformat(),
+        choice = completion.choices[0]
+        if choice.finish_reason == "length":
+            raise ReviewExecutionError(
+                "LLM response was truncated (finish_reason='length'). "
+                "Retry with a smaller diff or fewer files."
             )
 
-            return parsed_result, telemetry
+        parsed_result = choice.message.parsed
+        if parsed_result is None:
+            raise ReviewExecutionError("LLM response failed to parse into PRReviewResult")
 
-        except openai.OpenAIError as exc:
-            raise ReviewExecutionError(f"LLM API request failed: {exc}") from exc
-        except Exception as exc:
-            if isinstance(exc, ReviewExecutionError):
-                raise
-            raise ReviewExecutionError(f"Unexpected error during code review: {exc}") from exc
+        prompt_tokens = completion.usage.prompt_tokens if completion.usage else 0
+        completion_tokens = completion.usage.completion_tokens if completion.usage else 0
+
+        telemetry = TelemetryRecord(
+            model=self.model,
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+            latency_ms=round(latency_ms, 2),
+            timestamp=datetime.now(UTC).isoformat(),
+        )
+
+        return parsed_result, telemetry
+
+    def _call_with_retries(self, messages: list[dict]) -> "ParsedChatCompletion[PRReviewResult]":
+        """Call the completions endpoint, retrying transient failures.
+
+        Rate limits, timeouts and connection errors are retried with
+        exponential backoff and jitter — a single 429 from a shared endpoint
+        should not fail the whole review. Other 4xx errors are the caller's
+        mistake (bad key, unsupported parameter) and fail immediately.
+
+        ``LengthFinishReasonError`` never reaches the ``finish_reason`` check
+        in ``review``: the SDK raises it instead of returning a completion,
+        so it is wrapped here. The remaining ``OpenAIError`` fallback catches
+        the rest of the SDK's error surface (content-filter refusals, response
+        validation) so nothing escapes as a raw traceback.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                return self.client.beta.chat.completions.parse(
+                    model=self.model,
+                    messages=messages,
+                    response_format=PRReviewResult,
+                    temperature=0.0,
+                )
+            except openai.LengthFinishReasonError as exc:
+                raise ReviewExecutionError(
+                    "LLM response was truncated (finish_reason='length'). "
+                    "Retry with a smaller diff or fewer files."
+                ) from exc
+            except RETRYABLE_ERRORS as exc:
+                last_exc = exc
+            except openai.APIStatusError as exc:
+                if exc.status_code < 500:
+                    raise ReviewExecutionError(f"LLM API request failed: {exc}") from exc
+                last_exc = exc
+            except openai.OpenAIError as exc:
+                raise ReviewExecutionError(f"LLM API request failed: {exc}") from exc
+
+            if attempt < MAX_ATTEMPTS - 1:
+                backoff = (2**attempt) * (1 + random.random() * 0.1)
+                time.sleep(backoff)
+
+        raise ReviewExecutionError(
+            f"LLM API request failed after {MAX_ATTEMPTS} attempts: {last_exc}"
+        ) from last_exc
