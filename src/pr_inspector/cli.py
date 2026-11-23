@@ -7,7 +7,10 @@ import typer
 from rich.console import Console
 
 from pr_inspector import __version__
-from pr_inspector.application.use_cases.review_diff import ReviewDiffUseCase
+from pr_inspector.application.use_cases.review_diff import (
+    DEFAULT_MAX_INPUT_TOKENS,
+    ReviewDiffUseCase,
+)
 from pr_inspector.domain.entities import RISK_ORDER, RiskLevel
 from pr_inspector.domain.exceptions import PRInspectorError
 from pr_inspector.infrastructure.git.diff_extractor import GitCliDiffProvider
@@ -33,6 +36,7 @@ def create_review_use_case(
     base_url: str | None = None,
     api_key: str | None = None,
     model: str | None = None,
+    max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
 ) -> ReviewDiffUseCase:
     """Composition root: wire infrastructure adapters to application use case."""
     diff_provider = GitCliDiffProvider()
@@ -46,6 +50,7 @@ def create_review_use_case(
         diff_provider=diff_provider,
         reviewer=reviewer,
         telemetry_sink=telemetry_sink,
+        max_input_tokens=max_input_tokens,
     )
 
 
@@ -114,6 +119,15 @@ def review(
             help="API key for cloud providers (or set OPENAI_API_KEY).",
         ),
     ] = None,
+    max_input_tokens: Annotated[
+        int,
+        typer.Option(
+            "--max-input-tokens",
+            envvar="PR_INSPECTOR_MAX_INPUT_TOKENS",
+            min=1,
+            help="Token ceiling per LLM request; larger diffs are split into batches.",
+        ),
+    ] = DEFAULT_MAX_INPUT_TOKENS,
     json_output: Annotated[
         bool,
         typer.Option(
@@ -139,7 +153,12 @@ def review(
 ) -> None:
     """Review git diff and report potential bugs, security issues, and risk."""
     try:
-        use_case = create_review_use_case(base_url=base_url, api_key=api_key, model=model)
+        use_case = create_review_use_case(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            max_input_tokens=max_input_tokens,
+        )
         result, telemetry = use_case.execute(target_ref=target_ref, staged=staged)
 
         if json_output:
