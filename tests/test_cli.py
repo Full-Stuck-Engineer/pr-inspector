@@ -1,12 +1,14 @@
 """Tests for pr-inspector CLI commands and formatting."""
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
 from pr_inspector import __version__
+from pr_inspector.application.use_cases.review_diff import DEFAULT_MAX_INPUT_TOKENS
 from pr_inspector.cli import app
 from pr_inspector.domain.entities import (
     PRReviewResult,
@@ -14,9 +16,19 @@ from pr_inspector.domain.entities import (
     RiskLevel,
     TelemetryRecord,
 )
-from pr_inspector.domain.exceptions import DiffExtractionError
+from pr_inspector.domain.exceptions import DiffExtractionError, ReviewExecutionError
 
-runner = CliRunner()
+ANSI_ESCAPE_REGEX = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences so assertions stay deterministic in styled terminals."""
+    return ANSI_ESCAPE_REGEX.sub("", text)
+
+
+# Suppress ANSI color escapes so substring assertions on help and
+# CLI output stay deterministic across local and CI environments.
+runner = CliRunner(env={"NO_COLOR": "1"})
 
 
 def test_cli_version():
@@ -28,7 +40,7 @@ def test_cli_version():
 def test_cli_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "AI-powered PR review CLI tool" in result.stdout
+    assert "AI-powered PR review CLI tool" in strip_ansi(result.stdout)
 
 
 def test_cli_hello():
@@ -40,11 +52,54 @@ def test_cli_hello():
 def test_cli_review_help():
     result = runner.invoke(app, ["review", "--help"])
     assert result.exit_code == 0
-    assert "--target-ref" in result.stdout
-    assert "--model" in result.stdout
-    assert "--json" in result.stdout
-    assert "--output" in result.stdout
-    assert "--fail-on" in result.stdout
+    clean_stdout = strip_ansi(result.stdout)
+    assert "--target-ref" in clean_stdout
+    assert "--model" in clean_stdout
+    assert "--json" in clean_stdout
+    assert "--output" in clean_stdout
+    assert "--fail-on" in clean_stdout
+    assert "--max-input-tokens" in clean_stdout
+
+
+def _invoke_review_capturing_factory(args: list[str], env: dict[str, str] | None = None):
+    mock_use_case = MagicMock()
+    mock_use_case.execute.return_value = (
+        PRReviewResult(summary="ok", risk_level=RiskLevel.LOW, issues=[]),
+        None,
+    )
+    with patch("pr_inspector.cli.create_review_use_case", return_value=mock_use_case) as factory:
+        result = runner.invoke(app, ["review", *args], env=env)
+    return result, factory
+
+
+def test_cli_review_max_input_tokens_defaults_to_the_domain_ceiling():
+    result, factory = _invoke_review_capturing_factory([])
+
+    assert result.exit_code == 0
+    assert factory.call_args.kwargs["max_input_tokens"] == DEFAULT_MAX_INPUT_TOKENS
+
+
+def test_cli_review_max_input_tokens_from_option():
+    result, factory = _invoke_review_capturing_factory(["--max-input-tokens", "3000"])
+
+    assert result.exit_code == 0
+    assert factory.call_args.kwargs["max_input_tokens"] == 3000
+
+
+def test_cli_review_max_input_tokens_from_environment():
+    result, factory = _invoke_review_capturing_factory(
+        [], env={"PR_INSPECTOR_MAX_INPUT_TOKENS": "5000"}
+    )
+
+    assert result.exit_code == 0
+    assert factory.call_args.kwargs["max_input_tokens"] == 5000
+
+
+def test_cli_review_rejects_a_non_positive_ceiling():
+    result, factory = _invoke_review_capturing_factory(["--max-input-tokens", "0"])
+
+    assert result.exit_code != 0
+    factory.assert_not_called()
 
 
 def test_cli_review_json_output():
@@ -150,3 +205,53 @@ def test_cli_review_error_exit_code():
         result = runner.invoke(app, ["review"])
         assert result.exit_code == 2
         assert "Review Error" in result.stdout
+
+
+def test_cli_review_fenced_reply_gives_exit_code_2_not_traceback():
+    mock_use_case = MagicMock()
+    mock_use_case.execute.side_effect = ReviewExecutionError(
+        "LLM response failed to parse into PRReviewResult "
+        "(reply was not valid structured output or JSON)"
+    )
+
+    with patch("pr_inspector.cli.create_review_use_case", return_value=mock_use_case):
+        result = runner.invoke(app, ["review"])
+        assert result.exit_code == 2
+        assert "Review Error" in result.stdout
+        assert "Traceback" not in result.stdout
+        assert "ValidationError" not in result.stdout
+        assert "json_invalid" not in result.stdout
+
+
+def test_cli_review_json_output_is_lossless_for_long_and_markup_like_text():
+    # Longer than a terminal line, and containing tokens that look like Rich markup.
+    summary = (
+        "Reads config[0] and arr[i], then prints [red]colors[/red]. "
+        + "This sentence makes the summary longer than a terminal line. " * 6
+    ).strip()
+    suggested_fix = "Use [bold]parameterized queries[/bold] instead of string formatting. " * 3
+    mock_result = PRReviewResult(
+        summary=summary,
+        risk_level=RiskLevel.HIGH,
+        issues=[
+            ReviewIssue(
+                file_path="src/db.py",
+                line_number=45,
+                severity=RiskLevel.HIGH,
+                title="SQL Injection",
+                description="Unsanitized query concatenation. " * 5,
+                suggested_fix=suggested_fix,
+            )
+        ],
+    )
+    mock_use_case = MagicMock()
+    mock_use_case.execute.return_value = (mock_result, None)
+
+    with patch("pr_inspector.cli.create_review_use_case", return_value=mock_use_case):
+        result = runner.invoke(app, ["review", "--json", "--fail-on", "CRITICAL"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["summary"] == summary
+    assert data["issues"][0]["suggested_fix"] == suggested_fix
+    assert PRReviewResult.model_validate(data) == mock_result

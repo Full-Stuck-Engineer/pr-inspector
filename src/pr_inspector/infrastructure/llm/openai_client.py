@@ -2,15 +2,21 @@
 
 import os
 import random
+import re
 import time
 from datetime import UTC, datetime
 
 import openai
 from openai import OpenAI
 from openai.types.chat import ParsedChatCompletion
+from pydantic import ValidationError
 
 from pr_inspector.domain.entities import FileDiff, PRReviewResult, TelemetryRecord
 from pr_inspector.domain.exceptions import ReviewExecutionError
+
+# Matches a single Markdown code fence that wraps the whole reply, e.g.
+# ```json\n{...}\n``` or ```\n{...}\n```. Only the innermost JSON text is kept.
+_CODE_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*\n([\s\S]*?)\n\s*```\s*$")
 
 # Transient failures worth retrying: rate limits, timeouts, dropped connections.
 RETRYABLE_ERRORS = (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError)
@@ -90,7 +96,22 @@ class OpenAICompatibleLLMReviewer:
 
         parsed_result = choice.message.parsed
         if parsed_result is None:
-            raise ReviewExecutionError("LLM response failed to parse into PRReviewResult")
+            # Some models (especially local ones via Ollama) ignore the structured-output
+            # schema and return plain text. Try to recover by stripping a Markdown code fence
+            # before handing the text to the pydantic parser.
+            raw_content = choice.message.content
+            if isinstance(raw_content, str):
+                fence_match = _CODE_FENCE_RE.match(raw_content)
+                json_text = fence_match.group(1) if fence_match else raw_content
+                try:
+                    parsed_result = PRReviewResult.model_validate_json(json_text)
+                except ValidationError as exc:
+                    raise ReviewExecutionError(
+                        "LLM response failed to parse into PRReviewResult "
+                        "(reply was not valid structured output or JSON)"
+                    ) from exc
+            else:
+                raise ReviewExecutionError("LLM response failed to parse into PRReviewResult")
 
         prompt_tokens = completion.usage.prompt_tokens if completion.usage else 0
         completion_tokens = completion.usage.completion_tokens if completion.usage else 0
@@ -139,6 +160,11 @@ class OpenAICompatibleLLMReviewer:
                 if exc.status_code < 500:
                     raise ReviewExecutionError(f"LLM API request failed: {exc}") from exc
                 last_exc = exc
+            except ValidationError as exc:
+                raise ReviewExecutionError(
+                    "LLM response failed to parse into PRReviewResult "
+                    "(reply was not valid structured output or JSON)"
+                ) from exc
             except openai.OpenAIError as exc:
                 raise ReviewExecutionError(f"LLM API request failed: {exc}") from exc
 

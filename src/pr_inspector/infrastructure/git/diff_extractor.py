@@ -4,32 +4,71 @@ import ast
 import re
 import subprocess
 from fnmatch import fnmatch
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pr_inspector.domain.entities import DiffHunk, DiffLine, FileDiff
 from pr_inspector.domain.exceptions import DiffExtractionError
 
+# Matched against the file name and against the whole path.
 DEFAULT_IGNORED_PATTERNS: tuple[str, ...] = (
+    # Lockfiles
     "*.lock",
     "uv.lock",
     "package-lock.json",
     "poetry.lock",
     "yarn.lock",
     "pnpm-lock.yaml",
+    "go.sum",
+    # Minified output and source maps
     "*.min.js",
     "*.min.css",
     "*.map",
+    # Images, fonts and archives
     "*.svg",
     "*.png",
     "*.jpg",
     "*.jpeg",
     "*.gif",
     "*.ico",
+    "*.webp",
+    "*.avif",
+    "*.bmp",
+    "*.woff",
+    "*.woff2",
+    "*.ttf",
+    "*.otf",
+    "*.eot",
     "*.pdf",
-    "*.pyc",
-    "__pycache__/*",
+    "*.zip",
     "*.whl",
     "*.tar.gz",
+    "*.gz",
+    "*.jar",
+    # Compiled artifacts
+    "*.pyc",
+    "*.class",
+    "*.so",
+    "*.dylib",
+    "*.dll",
+    "*.exe",
+    # Generated code
+    "*_pb2.py",
+    "*_pb2_grpc.py",
+    "*.pb.go",
+    "*.generated.*",
+    "*.snap",
+)
+
+# Matched against each directory segment of a path, so nested directories are covered too.
+DEFAULT_IGNORED_DIRECTORIES: tuple[str, ...] = (
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    "coverage",
+    ".next",
+    "__pycache__",
+    "*.egg-info",
 )
 
 HUNK_HEADER_REGEX = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
@@ -124,9 +163,11 @@ class GitCliDiffProvider:
         self,
         repo_path: Path | None = None,
         ignored_patterns: tuple[str, ...] = DEFAULT_IGNORED_PATTERNS,
+        ignored_directories: tuple[str, ...] = DEFAULT_IGNORED_DIRECTORIES,
     ) -> None:
         self.repo_path = repo_path or Path.cwd()
         self.ignored_patterns = ignored_patterns
+        self.ignored_directories = ignored_directories
 
     def get_diff(self, target_ref: str | None = None, staged: bool = False) -> list[FileDiff]:
         """Fetch and parse git diff according to ref or staged mode."""
@@ -163,11 +204,33 @@ class GitCliDiffProvider:
             raise DiffExtractionError(f"Failed to execute git diff: {exc}") from exc
 
     def should_ignore_file(self, file_path: str) -> bool:
-        """Check if file matches any noise filtering pattern."""
-        file_name = Path(file_path).name
+        """Check if a file sits in an ignored directory or matches a noise pattern.
+
+        Directories are matched segment by segment at any depth, so ``packages/web/dist/x.js``
+        is skipped while ``src/dist_utils.py`` is not. Git paths always use forward slashes.
+        """
+        path = PurePosixPath(file_path)
+        if any(
+            fnmatch(segment, pattern)
+            for segment in path.parts[:-1]
+            for pattern in self.ignored_directories
+        ):
+            return True
         return any(
-            fnmatch(file_name, pattern) or fnmatch(file_path, pattern)
+            fnmatch(path.name, pattern) or fnmatch(file_path, pattern)
             for pattern in self.ignored_patterns
+        )
+
+    @staticmethod
+    def _is_binary_diff(lines: list[str]) -> bool:
+        """Whether a file section is a binary diff.
+
+        Git prints ``Binary files a/x and b/x differ``. Only the header lines are inspected,
+        and diff content lines always start with ``+``, ``-`` or a space, so added text that
+        merely looks like the notice cannot hide a real file.
+        """
+        return any(
+            line.startswith("Binary files ") and line.endswith(" differ") for line in lines[:10]
         )
 
     def parse_unified_diff(self, raw_diff: str) -> list[FileDiff]:
@@ -193,7 +256,7 @@ class GitCliDiffProvider:
             if (
                 target_path is None
                 or self.should_ignore_file(target_path)
-                or any("Binary files differ" in line for line in lines[:10])
+                or self._is_binary_diff(lines)
             ):
                 continue
 
