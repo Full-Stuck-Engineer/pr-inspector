@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from typer.testing import CliRunner
 
 from pr_inspector import __version__
+from pr_inspector.application.use_cases.review_diff import DEFAULT_MAX_INPUT_TOKENS
 from pr_inspector.cli import app
 from pr_inspector.domain.entities import (
     PRReviewResult,
@@ -57,6 +58,48 @@ def test_cli_review_help():
     assert "--json" in clean_stdout
     assert "--output" in clean_stdout
     assert "--fail-on" in clean_stdout
+    assert "--max-input-tokens" in clean_stdout
+
+
+def _invoke_review_capturing_factory(args: list[str], env: dict[str, str] | None = None):
+    mock_use_case = MagicMock()
+    mock_use_case.execute.return_value = (
+        PRReviewResult(summary="ok", risk_level=RiskLevel.LOW, issues=[]),
+        None,
+    )
+    with patch("pr_inspector.cli.create_review_use_case", return_value=mock_use_case) as factory:
+        result = runner.invoke(app, ["review", *args], env=env)
+    return result, factory
+
+
+def test_cli_review_max_input_tokens_defaults_to_the_domain_ceiling():
+    result, factory = _invoke_review_capturing_factory([])
+
+    assert result.exit_code == 0
+    assert factory.call_args.kwargs["max_input_tokens"] == DEFAULT_MAX_INPUT_TOKENS
+
+
+def test_cli_review_max_input_tokens_from_option():
+    result, factory = _invoke_review_capturing_factory(["--max-input-tokens", "3000"])
+
+    assert result.exit_code == 0
+    assert factory.call_args.kwargs["max_input_tokens"] == 3000
+
+
+def test_cli_review_max_input_tokens_from_environment():
+    result, factory = _invoke_review_capturing_factory(
+        [], env={"PR_INSPECTOR_MAX_INPUT_TOKENS": "5000"}
+    )
+
+    assert result.exit_code == 0
+    assert factory.call_args.kwargs["max_input_tokens"] == 5000
+
+
+def test_cli_review_rejects_a_non_positive_ceiling():
+    result, factory = _invoke_review_capturing_factory(["--max-input-tokens", "0"])
+
+    assert result.exit_code != 0
+    factory.assert_not_called()
 
 
 def test_cli_review_json_output():
