@@ -16,7 +16,9 @@ from pr_inspector.domain.entities import (
 )
 from pr_inspector.domain.exceptions import DiffExtractionError
 
-runner = CliRunner()
+# Suppress ANSI color escapes so substring assertions on help and
+# CLI output stay deterministic across local and CI environments.
+runner = CliRunner(env={"NO_COLOR": "1"})
 
 
 def test_cli_version():
