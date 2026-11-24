@@ -1,6 +1,7 @@
 """Domain entities and value objects for pr-inspector."""
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
 
@@ -34,6 +35,10 @@ class ReviewIssue(BaseModel):
     title: str = Field(description="Brief headline of the problem")
     description: str = Field(description="Detailed explanation of the defect or security flaw")
     suggested_fix: str | None = Field(default=None, description="Recommended remediation")
+    cited_files: list[str] = Field(
+        default_factory=list,
+        description="External codebase files cited as evidence or reference for this issue",
+    )
 
 
 class PRReviewResult(BaseModel):
@@ -42,6 +47,10 @@ class PRReviewResult(BaseModel):
     summary: str = Field(description="High-level assessment of the pull request changes")
     risk_level: RiskLevel = Field(description="Aggregated risk severity")
     issues: list[ReviewIssue] = Field(default_factory=list, description="List of identified issues")
+    cited_files: list[str] = Field(
+        default_factory=list,
+        description="Source files from codebase context cited in the review report",
+    )
 
     @model_validator(mode="after")
     def _align_risk_level_with_issues(self) -> "PRReviewResult":
@@ -121,3 +130,87 @@ class TelemetryRecord:
     output_tokens: int
     latency_ms: float
     timestamp: str
+    retrieved_chunks: int = 0
+    rerank_latency_ms: float = 0.0
+    context_tokens: int = 0
+
+
+class ChunkType(StrEnum):
+    """Categorization of a code or document chunk."""
+
+    FUNCTION = "function"
+    METHOD = "method"
+    CLASS = "class"
+    MODULE_PREAMBLE = "module_preamble"
+    MARKDOWN_SECTION = "markdown_section"
+    TEXT_BLOCK = "text_block"
+
+
+class SymbolKind(StrEnum):
+    """Kind of a code symbol definition."""
+
+    FUNCTION = "function"
+    METHOD = "method"
+    CLASS = "class"
+    VARIABLE = "variable"
+    INTERFACE = "interface"
+
+
+class SymbolDefinition(BaseModel):
+    """A symbol definition extracted from source code."""
+
+    name: str = Field(description="Name of the defined symbol")
+    kind: SymbolKind = Field(description="Kind of symbol")
+    file_path: str = Field(description="Relative path of defining file")
+    line_number: int = Field(ge=1, description="1-based line number of definition")
+    signature: str | None = Field(default=None, description="Function/method call signature")
+    docstring: str | None = Field(default=None, description="Extracted docstring summary")
+
+
+class CodeChunk(BaseModel):
+    """A structure-aware chunk of code or documentation."""
+
+    id: str = Field(description="Globally unique chunk identifier")
+    file_path: str = Field(description="Relative file path")
+    content: str = Field(description="Extracted chunk text content")
+    start_line: int = Field(ge=1, description="1-based starting line number")
+    end_line: int = Field(ge=1, description="1-based ending line number")
+    chunk_type: ChunkType = Field(description="Classification of this chunk")
+    symbol_name: str | None = Field(
+        default=None, description="Primary symbol defined by this chunk"
+    )
+    parent_symbol: str | None = Field(default=None, description="Enclosing class or symbol name")
+    language: str = Field(default="text", description="Programming or markup language")
+
+
+class FileChangeSet(BaseModel):
+    """Detected file differences between working tree and manifest."""
+
+    added: list[str] = Field(default_factory=list, description="New files not in manifest")
+    modified: list[str] = Field(
+        default_factory=list, description="Files with changed content hashes"
+    )
+    deleted: list[str] = Field(
+        default_factory=list, description="Files in manifest but removed from disk"
+    )
+    unchanged: list[str] = Field(
+        default_factory=list, description="Files with matching content hashes"
+    )
+
+    @property
+    def has_changes(self) -> bool:
+        """Return True if any added, modified, or deleted files are detected."""
+        return bool(self.added or self.modified or self.deleted)
+
+
+class IndexManifest(BaseModel):
+    """Persistent state recording indexed files and their SHA256 hashes."""
+
+    version: int = Field(default=1, description="Manifest schema version")
+    file_hashes: dict[str, str] = Field(
+        default_factory=dict, description="Mapping of relative file path to SHA256 digest"
+    )
+    updated_at: str = Field(
+        default_factory=lambda: datetime.now(UTC).isoformat(),
+        description="ISO 8601 timestamp of last index update",
+    )

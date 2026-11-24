@@ -15,7 +15,15 @@ def merge_review_results(results: Sequence[PRReviewResult]) -> PRReviewResult:
     summary = " ".join(text for result in results if (text := result.summary.strip()))
     risk_level = max((result.risk_level for result in results), key=RISK_ORDER.__getitem__)
     issues = [issue for result in results for issue in result.issues]
-    return PRReviewResult(summary=summary, risk_level=risk_level, issues=issues)
+    cited_files = sorted(
+        list(
+            {f for result in results for f in result.cited_files}
+            | {f for result in results for issue in result.issues for f in issue.cited_files}
+        )
+    )
+    return PRReviewResult(
+        summary=summary, risk_level=risk_level, issues=issues, cited_files=cited_files
+    )
 
 
 def merge_telemetry(records: Sequence[TelemetryRecord]) -> TelemetryRecord:
@@ -35,4 +43,7 @@ def merge_telemetry(records: Sequence[TelemetryRecord]) -> TelemetryRecord:
         output_tokens=sum(record.output_tokens for record in records),
         latency_ms=round(sum(record.latency_ms for record in records), 2),
         timestamp=records[-1].timestamp,
+        retrieved_chunks=sum(record.retrieved_chunks for record in records),
+        rerank_latency_ms=round(sum(record.rerank_latency_ms for record in records), 2),
+        context_tokens=sum(record.context_tokens for record in records),
     )

@@ -1,9 +1,11 @@
 """Review diff use case orchestrating extraction, analysis, and telemetry."""
 
+import dataclasses
+
 from pr_inspector.domain.chunking import split_into_batches
 from pr_inspector.domain.entities import FileDiff, PRReviewResult, RiskLevel, TelemetryRecord
 from pr_inspector.domain.exceptions import ReviewExecutionError
-from pr_inspector.domain.protocols import DiffProvider, LLMReviewer, TelemetrySink
+from pr_inspector.domain.protocols import ContextRetriever, DiffProvider, LLMReviewer, TelemetrySink
 from pr_inspector.domain.review_merging import merge_review_results, merge_telemetry
 
 # Ceiling for the diff text of one LLM request. It excludes the system prompt and the model's
@@ -28,6 +30,7 @@ class ReviewDiffUseCase:
         reviewer: LLMReviewer,
         telemetry_sink: TelemetrySink | None = None,
         max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
+        context_retriever: ContextRetriever | None = None,
     ) -> None:
         if max_input_tokens < 1:
             raise ValueError("max_input_tokens must be at least 1")
@@ -35,6 +38,7 @@ class ReviewDiffUseCase:
         self._reviewer = reviewer
         self._telemetry_sink = telemetry_sink
         self._max_input_tokens = max_input_tokens
+        self._context_retriever = context_retriever
 
     def execute(
         self,
@@ -67,14 +71,34 @@ class ReviewDiffUseCase:
         results: list[PRReviewResult] = []
         records: list[TelemetryRecord] = []
         for position, batch in enumerate(batches, start=1):
+            context: str | None = None
+            if self._context_retriever is not None:
+                context = self._context_retriever.retrieve_context_for_diffs(batch)
+
             try:
-                result, telemetry = self._reviewer.review(batch)
+                try:
+                    result, telemetry = self._reviewer.review(batch, context=context)
+                except TypeError:
+                    # Backward-compat fallback if a custom mock doesn't accept context arg
+                    result, telemetry = self._reviewer.review(batch)
             except ReviewExecutionError as exc:
                 if len(batches) == 1:
                     raise
                 raise ReviewExecutionError(
                     f"Review failed on batch {position} of {len(batches)}: {exc}"
                 ) from exc
+
+            if self._context_retriever is not None and hasattr(
+                self._context_retriever, "last_retrieval_stats"
+            ):
+                stats = self._context_retriever.last_retrieval_stats
+                telemetry = dataclasses.replace(
+                    telemetry,
+                    retrieved_chunks=stats.get("retrieved_chunks", 0),
+                    context_tokens=stats.get("context_tokens", 0),
+                    rerank_latency_ms=stats.get("rerank_latency_ms", 0.0),
+                )
+
             results.append(result)
             records.append(telemetry)
 

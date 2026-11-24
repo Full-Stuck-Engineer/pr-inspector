@@ -34,6 +34,11 @@ and minor naming preferences.
 3. Every reported issue MUST cite the exact line number from the annotated diff (+ lines only).
 4. If the diff contains no serious bugs or security issues, return an empty issues list and set \
 risk_level to 'LOW'. Do NOT invent or hallucinate issues.
+5. If relevant codebase context is provided under "## Relevant Codebase Context", ground your \
+analysis in the referenced codebase architecture, caller/callee contracts, and type definitions. \
+Cite every referenced external file path in `cited_files`. If the provided context is not \
+relevant or no context is provided, rely strictly on the diff itself and do NOT invent \
+file citations.
 """
 
 
@@ -72,15 +77,21 @@ class OpenAICompatibleLLMReviewer:
             timeout=timeout,
         )
 
-    def review(self, diffs: list[FileDiff]) -> tuple[PRReviewResult, TelemetryRecord]:
+    def review(
+        self, diffs: list[FileDiff], context: str | None = None
+    ) -> tuple[PRReviewResult, TelemetryRecord]:
         """Analyze diffs and produce structured review result with telemetry."""
         diff_text = "\n\n".join(d.annotated_diff_text for d in diffs if d.hunks)
         if not diff_text.strip():
             diff_text = "No code hunk changes found in diff."
 
+        user_prompt = f"Review the following code diff:\n\n{diff_text}"
+        if context and context.strip():
+            user_prompt = f"{user_prompt}\n\n## Relevant Codebase Context\n\n{context.strip()}"
+
         messages = [
             {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Review the following code diff:\n\n{diff_text}"},
+            {"role": "user", "content": user_prompt},
         ]
 
         start_time = time.perf_counter()

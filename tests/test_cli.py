@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from typer.testing import CliRunner
 
 from pr_inspector import __version__
+from pr_inspector.application.use_cases.index_repository import IndexingResult
 from pr_inspector.application.use_cases.review_diff import DEFAULT_MAX_INPUT_TOKENS
 from pr_inspector.cli import app
 from pr_inspector.domain.entities import (
@@ -59,6 +60,8 @@ def test_cli_review_help():
     assert "--output" in clean_stdout
     assert "--fail-on" in clean_stdout
     assert "--max-input-tokens" in clean_stdout
+    assert "--rag" in clean_stdout
+    assert "--no-rag" in clean_stdout
 
 
 def _invoke_review_capturing_factory(args: list[str], env: dict[str, str] | None = None):
@@ -255,3 +258,124 @@ def test_cli_review_json_output_is_lossless_for_long_and_markup_like_text():
     assert data["summary"] == summary
     assert data["issues"][0]["suggested_fix"] == suggested_fix
     assert PRReviewResult.model_validate(data) == mock_result
+
+
+def test_cli_index_help():
+    result = runner.invoke(app, ["index", "--help"])
+    assert result.exit_code == 0
+    clean = strip_ansi(result.stdout)
+    assert "--force" in clean
+    assert "--clean" in clean
+    assert "--repo-path" in clean
+
+
+def test_cli_index_execution():
+    mock_result = IndexingResult(
+        total_files_scanned=10,
+        added_files=10,
+        modified_files=0,
+        deleted_files=0,
+        unchanged_files=0,
+        total_chunks=25,
+        duration_ms=120.5,
+    )
+    mock_use_case = MagicMock()
+    mock_use_case.execute.return_value = mock_result
+
+    with patch("pr_inspector.cli.create_index_use_case", return_value=mock_use_case) as factory:
+        result = runner.invoke(app, ["index"])
+        assert result.exit_code == 0
+        clean = strip_ansi(result.stdout)
+        assert "Codebase Indexing Summary" in clean
+        assert "Total Files Scanned" in clean
+        assert "10" in clean
+        assert "25" in clean
+        assert "Codebase index updated successfully" in clean
+        factory.assert_called_once()
+        mock_use_case.execute.assert_called_once_with(force=False, clean=False)
+
+
+def test_cli_index_with_flags():
+    mock_result = IndexingResult(
+        total_files_scanned=5,
+        added_files=5,
+        modified_files=0,
+        deleted_files=0,
+        unchanged_files=0,
+        total_chunks=15,
+        duration_ms=80.0,
+    )
+    mock_use_case = MagicMock()
+    mock_use_case.execute.return_value = mock_result
+
+    with patch("pr_inspector.cli.create_index_use_case", return_value=mock_use_case) as factory:
+        result = runner.invoke(app, ["index", "--force", "--clean", "--repo-path", "."])
+        assert result.exit_code == 0
+        factory.assert_called_once()
+        mock_use_case.execute.assert_called_once_with(force=True, clean=True)
+
+
+def test_cli_review_rag_flag_defaults_to_true():
+    _, factory = _invoke_review_capturing_factory([])
+    assert factory.call_args.kwargs["enable_rag"] is True
+
+
+def test_cli_review_no_rag_disables_rag():
+    _, factory = _invoke_review_capturing_factory(["--no-rag"])
+    assert factory.call_args.kwargs["enable_rag"] is False
+
+
+def test_cli_review_renders_citations_and_rag_telemetry(tmp_path: Path):
+    mock_result = PRReviewResult(
+        summary="Grounded review assessment",
+        risk_level=RiskLevel.MEDIUM,
+        issues=[
+            ReviewIssue(
+                file_path="src/api.py",
+                line_number=20,
+                severity=RiskLevel.MEDIUM,
+                title="Mismatched signature",
+                description="Caller expects string argument",
+                cited_files=["src/caller.py"],
+            )
+        ],
+        cited_files=["src/caller.py", "src/types.py"],
+    )
+    mock_telemetry = TelemetryRecord(
+        model="qwen2.5-coder:7b",
+        input_tokens=350,
+        output_tokens=90,
+        latency_ms=450.0,
+        timestamp="2026-11-24T00:00:00Z",
+        retrieved_chunks=3,
+        rerank_latency_ms=35.5,
+        context_tokens=850,
+    )
+    mock_use_case = MagicMock()
+    mock_use_case.execute.return_value = (mock_result, mock_telemetry)
+
+    report_file = tmp_path / "rag_report.md"
+
+    with patch("pr_inspector.cli.create_review_use_case", return_value=mock_use_case):
+        result = runner.invoke(app, ["review", "--fail-on", "HIGH", "--output", str(report_file)])
+        assert result.exit_code == 0
+
+        clean = strip_ansi(result.stdout)
+        assert "Referenced Codebase Files" in clean
+        assert "src/caller.py" in clean
+        assert "src/types.py" in clean
+        assert "Cited References: src/caller.py" in clean
+        assert "RAG" in clean
+        assert "Chunks" in clean
+        assert "Context" in clean
+        assert "Tokens" in clean
+
+        # Verify markdown output contains citations and RAG metrics
+        md_text = report_file.read_text(encoding="utf-8")
+        assert "## Referenced Codebase Files" in md_text
+        assert "- `src/caller.py`" in md_text
+        assert "- `src/types.py`" in md_text
+        assert "- **Cited Files:** `src/caller.py`" in md_text
+        assert "| **Retrieved Chunks** | `3` |" in md_text
+        assert "| **Context Tokens** | `850` |" in md_text
+        assert "| **Rerank Latency** | `35.5 ms` |" in md_text
