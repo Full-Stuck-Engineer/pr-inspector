@@ -76,6 +76,42 @@ def test_use_case_passes_retrieved_context_to_reviewer():
     mock_reviewer.review.assert_called_once_with([diff], context="### src/auth.py context")
 
 
+def test_use_case_attaches_rag_telemetry_from_retriever():
+    diff = make_diff()
+    mock_diff_provider = MagicMock(spec=DiffProvider)
+    mock_diff_provider.get_diff.return_value = [diff]
+
+    mock_context_retriever = MagicMock(spec=ContextRetriever)
+    mock_context_retriever.retrieve_context_for_diffs.return_value = "### src/auth.py context"
+    mock_context_retriever.last_retrieval_stats = {
+        "retrieved_chunks": 4,
+        "context_tokens": 1500,
+        "rerank_latency_ms": 62.5,
+    }
+
+    mock_result = PRReviewResult(summary="OK", risk_level=RiskLevel.LOW, issues=[])
+    mock_telemetry = TelemetryRecord(
+        model="test-model",
+        input_tokens=100,
+        output_tokens=50,
+        latency_ms=200.0,
+        timestamp="2026-11-24T00:00:00Z",
+    )
+    mock_reviewer = MagicMock(spec=LLMReviewer)
+    mock_reviewer.review.return_value = (mock_result, mock_telemetry)
+
+    use_case = ReviewDiffUseCase(
+        diff_provider=mock_diff_provider,
+        reviewer=mock_reviewer,
+        context_retriever=mock_context_retriever,
+    )
+    _, telemetry = use_case.execute()
+
+    assert telemetry.retrieved_chunks == 4
+    assert telemetry.context_tokens == 1500
+    assert telemetry.rerank_latency_ms == 62.5
+
+
 def test_use_case_without_context_retriever_passes_none():
     diff = make_diff()
     mock_diff_provider = MagicMock(spec=DiffProvider)
