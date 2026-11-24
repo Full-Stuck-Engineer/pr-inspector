@@ -130,6 +130,9 @@ class TelemetryRecord:
     output_tokens: int
     latency_ms: float
     timestamp: str
+    retrieved_chunks: int = 0
+    rerank_latency_ms: float = 0.0
+    context_tokens: int = 0
 
 
 class ChunkType(StrEnum):

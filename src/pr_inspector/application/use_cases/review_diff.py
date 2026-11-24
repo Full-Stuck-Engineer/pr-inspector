@@ -1,5 +1,7 @@
 """Review diff use case orchestrating extraction, analysis, and telemetry."""
 
+import dataclasses
+
 from pr_inspector.domain.chunking import split_into_batches
 from pr_inspector.domain.entities import FileDiff, PRReviewResult, RiskLevel, TelemetryRecord
 from pr_inspector.domain.exceptions import ReviewExecutionError
@@ -85,6 +87,18 @@ class ReviewDiffUseCase:
                 raise ReviewExecutionError(
                     f"Review failed on batch {position} of {len(batches)}: {exc}"
                 ) from exc
+
+            if self._context_retriever is not None and hasattr(
+                self._context_retriever, "last_retrieval_stats"
+            ):
+                stats = self._context_retriever.last_retrieval_stats
+                telemetry = dataclasses.replace(
+                    telemetry,
+                    retrieved_chunks=stats.get("retrieved_chunks", 0),
+                    context_tokens=stats.get("context_tokens", 0),
+                    rerank_latency_ms=stats.get("rerank_latency_ms", 0.0),
+                )
+
             results.append(result)
             records.append(telemetry)
 

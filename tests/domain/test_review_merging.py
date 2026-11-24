@@ -104,6 +104,35 @@ def test_telemetry_is_summed_and_stamped_with_the_last_batch():
     assert merged.timestamp == "t3"
 
 
+def test_merge_telemetry_sums_rag_metrics():
+    r1 = TelemetryRecord(
+        model="test-m",
+        input_tokens=100,
+        output_tokens=20,
+        latency_ms=500.0,
+        timestamp="t1",
+        retrieved_chunks=3,
+        rerank_latency_ms=45.5,
+        context_tokens=1200,
+    )
+    r2 = TelemetryRecord(
+        model="test-m",
+        input_tokens=150,
+        output_tokens=30,
+        latency_ms=600.0,
+        timestamp="t2",
+        retrieved_chunks=2,
+        rerank_latency_ms=30.2,
+        context_tokens=800,
+    )
+    merged = merge_telemetry([r1, r2])
+
+    assert merged.retrieved_chunks == 5
+    assert merged.rerank_latency_ms == 75.7
+    assert merged.context_tokens == 2000
+    assert merged.timestamp == "t2"
+
+
 def test_merge_telemetry_requires_input():
     with pytest.raises(ValueError, match="at least one"):
         merge_telemetry([])

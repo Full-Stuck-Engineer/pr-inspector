@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from pr_inspector.domain.entities import PRReviewResult, RiskLevel, TelemetryRecord
+from pr_inspector.domain.entities import CodeChunk, PRReviewResult, RiskLevel, TelemetryRecord
 
 RISK_STYLE_MAP: dict[RiskLevel, str] = {
     RiskLevel.LOW: "bold green",
@@ -20,6 +20,7 @@ def render_review_dashboard(
     console: Console,
     result: PRReviewResult,
     telemetry: TelemetryRecord | None = None,
+    retrieved_chunks: list[CodeChunk] | None = None,
 ) -> None:
     """Render a full Rich visual dashboard in the terminal."""
     risk_style = RISK_STYLE_MAP.get(result.risk_level, "bold cyan")
@@ -27,6 +28,30 @@ def render_review_dashboard(
     console.print(Panel(banner_text, title="pr-inspector Assessment", expand=False))
 
     console.print(Panel(result.summary, title="Summary", border_style="blue"))
+
+    if result.cited_files:
+        cited_list = ", ".join(f"[bold cyan]{f}[/bold cyan]" for f in result.cited_files)
+        console.print(
+            Panel(
+                cited_list,
+                title=f"Referenced Codebase Files ({len(result.cited_files)})",
+                border_style="cyan",
+            )
+        )
+
+    if retrieved_chunks:
+        chunk_table = Table(
+            title=f"Retrieved Codebase Context ({len(retrieved_chunks)} chunks)", box=None
+        )
+        chunk_table.add_column("File", style="cyan")
+        chunk_table.add_column("Lines", style="yellow")
+        chunk_table.add_column("Type / Symbol", style="magenta")
+        for chunk in retrieved_chunks:
+            symbol_part = f"`{chunk.symbol_name}`" if chunk.symbol_name else chunk.chunk_type.value
+            chunk_table.add_row(
+                chunk.file_path, f"{chunk.start_line}-{chunk.end_line}", symbol_part
+            )
+        console.print(chunk_table)
 
     if not result.issues:
         console.print("[bold green]✔ No issues or vulnerabilities detected![/bold green]\n")
@@ -44,6 +69,10 @@ def render_review_dashboard(
             if issue.suggested_fix:
                 content.append("\n[bold]Suggested Remediation:[/bold]")
                 content.append(issue.suggested_fix)
+            if issue.cited_files:
+                content.append(
+                    f"\n[bold dim]Cited References:[/bold dim] {', '.join(issue.cited_files)}"
+                )
 
             panel = Panel("\n".join(content), title=f"Issue #{i} - {header}", border_style="yellow")
             console.print(panel)
@@ -54,15 +83,28 @@ def render_review_dashboard(
         table.add_column("Input Tokens", style="magenta")
         table.add_column("Output Tokens", style="magenta")
         table.add_column("Latency (ms)", style="green")
+        if telemetry.retrieved_chunks > 0:
+            table.add_column("RAG Chunks", style="blue")
+            table.add_column("Context Tokens", style="blue")
+            table.add_column("Rerank (ms)", style="green")
         table.add_column("Timestamp", style="dim")
 
-        table.add_row(
+        row = [
             telemetry.model,
             str(telemetry.input_tokens),
             str(telemetry.output_tokens),
             f"{telemetry.latency_ms:.2f} ms",
-            telemetry.timestamp,
-        )
+        ]
+        if telemetry.retrieved_chunks > 0:
+            row.extend(
+                [
+                    str(telemetry.retrieved_chunks),
+                    str(telemetry.context_tokens),
+                    f"{telemetry.rerank_latency_ms:.2f} ms",
+                ]
+            )
+        row.append(telemetry.timestamp)
+        table.add_row(*row)
         console.print(table)
 
 
@@ -76,24 +118,35 @@ def format_markdown_report(result: PRReviewResult, telemetry: TelemetryRecord | 
         "## Summary",
         result.summary,
         "",
-        "## Issues",
     ]
+
+    if result.cited_files:
+        lines.extend(
+            [
+                "## Referenced Codebase Files",
+                *[f"- `{f}`" for f in result.cited_files],
+                "",
+            ]
+        )
+
+    lines.append("## Issues")
 
     if not result.issues:
         lines.append("*No issues or vulnerabilities detected.*")
     else:
         for i, issue in enumerate(result.issues, start=1):
-            lines.extend(
-                [
-                    f"### #{i} [{issue.severity}] {issue.title}",
-                    f"- **File:** `{issue.file_path}`",
-                    f"- **Line:** `{issue.line_number}`",
-                    "",
-                    issue.description,
-                ]
-            )
+            issue_lines = [
+                f"### #{i} [{issue.severity}] {issue.title}",
+                f"- **File:** `{issue.file_path}`",
+                f"- **Line:** `{issue.line_number}`",
+            ]
+            if issue.cited_files:
+                cited_str = ", ".join(f"`{f}`" for f in issue.cited_files)
+                issue_lines.append(f"- **Cited Files:** {cited_str}")
+            issue_lines.extend(["", issue.description])
+
             if issue.suggested_fix:
-                lines.extend(
+                issue_lines.extend(
                     [
                         "",
                         "**Suggested Fix:**",
@@ -102,22 +155,30 @@ def format_markdown_report(result: PRReviewResult, telemetry: TelemetryRecord | 
                         "```",
                     ]
                 )
-            lines.append("")
+            issue_lines.append("")
+            lines.extend(issue_lines)
 
     if telemetry:
-        lines.extend(
-            [
-                "",
-                "## Telemetry",
-                "| Metric | Value |",
-                "| :--- | :--- |",
-                f"| **Model** | `{telemetry.model}` |",
-                f"| **Input Tokens** | `{telemetry.input_tokens}` |",
-                f"| **Output Tokens** | `{telemetry.output_tokens}` |",
-                f"| **Latency** | `{telemetry.latency_ms} ms` |",
-                f"| **Timestamp** | `{telemetry.timestamp}` |",
-            ]
-        )
+        telemetry_rows = [
+            "",
+            "## Telemetry",
+            "| Metric | Value |",
+            "| :--- | :--- |",
+            f"| **Model** | `{telemetry.model}` |",
+            f"| **Input Tokens** | `{telemetry.input_tokens}` |",
+            f"| **Output Tokens** | `{telemetry.output_tokens}` |",
+            f"| **Latency** | `{telemetry.latency_ms} ms` |",
+        ]
+        if telemetry.retrieved_chunks > 0:
+            telemetry_rows.extend(
+                [
+                    f"| **Retrieved Chunks** | `{telemetry.retrieved_chunks}` |",
+                    f"| **Context Tokens** | `{telemetry.context_tokens}` |",
+                    f"| **Rerank Latency** | `{telemetry.rerank_latency_ms} ms` |",
+                ]
+            )
+        telemetry_rows.append(f"| **Timestamp** | `{telemetry.timestamp}` |")
+        lines.extend(telemetry_rows)
 
     return "\n".join(lines)
 
