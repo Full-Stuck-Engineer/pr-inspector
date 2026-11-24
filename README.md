@@ -5,10 +5,13 @@ Automated, lightweight, and observable AI-powered PR review CLI tool.
 ## Features
 
 - **Pydantic Structured Outputs:** Schema guarantees (`summary`, `risk_level`, `issues[]`) with zero framework bloat.
-- **Rich Visual Dashboard:** Terminal dashboard displaying risk badges, line-by-line findings, and actionable recommendations.
+- **Rich Visual Dashboard:** Terminal dashboard displaying risk badges, line-by-line findings, actionable remediation, source citations, and telemetry.
+- **Codebase Indexing & Semantic Context (RAG):** Structure-aware AST chunking for Python (`class`, `def`, module preambles), Markdown heading-level chunking, and sliding line-window fallback.
+- **Hybrid Retrieval & Precision Reranking:** Combines exact BM25 keyword matching (with camelCase and snake_case tokenization) with dense vector similarity via Reciprocal Rank Fusion (RRF), precision-scored by cross-encoder reranking.
+- **Grounded Prompting with Citations:** Grounded analysis citing external codebase files (`cited_files`), providing architecture context while filtering out files present in the diff.
 - **CI/CD Quality Gate:** Strict exit-code contracts via `--fail-on` thresholding (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`).
 - **Production Resilience:** Automatic exponential backoff retries with jitter for rate limits (429) and server errors (5xx), plus token ceiling truncation detection.
-- **Observable Telemetry:** Every review records model name, token usage, and latency.
+- **Observable Telemetry:** Every review records model name, token usage, latency, retrieved RAG chunks, context tokens, and rerank latency.
 
 ## Setup & Installation
 
@@ -42,28 +45,52 @@ export OPENAI_MODEL="qwen2.5-coder:7b"
 
 ## Usage
 
-### Reviewing Diffs
+### 1. Codebase Indexing (`index`)
+
+Build and incrementally update the repository code chunk index in `.pr-inspector/`:
 
 ```bash
-# Review unstaged & staged changes in the current working directory
-uv run pr-inspector review
+# Build or incrementally update index for current repository
+uv run pr-inspector index
 
-# Review changes against a base branch
-uv run pr-inspector review --base main
+# Force full re-indexing of all files, ignoring existing manifest
+uv run pr-inspector index --force
 
-# Review a specific commit
-uv run pr-inspector review --commit HEAD~1
+# Purge cache and rebuild cleanly
+uv run pr-inspector index --clean
+
+# Index a specific repository directory
+uv run pr-inspector index --repo-path /path/to/repo
 ```
 
-### Exporting Reports
-Export structured reviews to JSON or formatted Markdown:
+### 2. Reviewing Diffs (`review`)
+
+```bash
+# Review changes with codebase RAG context enrichment (enabled by default)
+uv run pr-inspector review
+
+# Review changes against a base branch / reference
+uv run pr-inspector review --target-ref main
+
+# Review only staged git changes
+uv run pr-inspector review --staged
+
+# Review git diff only without codebase retrieval
+uv run pr-inspector review --no-rag
+```
+
+### 3. Exporting Reports
+
+Export structured reviews to JSON or formatted Markdown (including referenced codebase files and RAG metrics):
 ```bash
 uv run pr-inspector review --output review-report.json
 uv run pr-inspector review --output review-report.md
 ```
 
-### Large Diffs (`--max-input-tokens`)
+### 4. Large Diffs (`--max-input-tokens`)
+
 A large diff is split into batches, each batch is reviewed in its own request, and the results are merged into one report. Whole files are kept together where possible; a file bigger than the ceiling is split between hunks, never inside one, so reported line numbers stay exact.
+
 ```bash
 # Default ceiling is 8000 tokens of diff per request
 uv run pr-inspector review --max-input-tokens 6000
@@ -75,11 +102,12 @@ A single hunk larger than the ceiling, typically a very large new file, is still
 
 Ollama defaults to a 4k-token context window on machines with 16 GB of memory or less. Either start the server with a larger window (`OLLAMA_CONTEXT_LENGTH=16384 ollama serve`) or lower `--max-input-tokens` to fit the window you have.
 
-### CI/CD Gating (`--fail-on`)
+### 5. CI/CD Gating (`--fail-on`)
+
 Block broken pull requests in CI pipelines by exiting with non-zero code on risk thresholds:
 ```bash
 # Fails the CI pipeline if review identifies HIGH or CRITICAL risk
-uv run pr-inspector review --base origin/main --fail-on HIGH
+uv run pr-inspector review --target-ref origin/main --fail-on HIGH
 ```
 
 ## Development
