@@ -1,6 +1,7 @@
 """Tests for pr-inspector CLI commands and formatting."""
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +17,14 @@ from pr_inspector.domain.entities import (
 )
 from pr_inspector.domain.exceptions import DiffExtractionError
 
+ANSI_ESCAPE_REGEX = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences so assertions stay deterministic in styled terminals."""
+    return ANSI_ESCAPE_REGEX.sub("", text)
+
+
 # Suppress ANSI color escapes so substring assertions on help and
 # CLI output stay deterministic across local and CI environments.
 runner = CliRunner(env={"NO_COLOR": "1"})
@@ -30,7 +39,7 @@ def test_cli_version():
 def test_cli_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "AI-powered PR review CLI tool" in result.stdout
+    assert "AI-powered PR review CLI tool" in strip_ansi(result.stdout)
 
 
 def test_cli_hello():
@@ -42,11 +51,12 @@ def test_cli_hello():
 def test_cli_review_help():
     result = runner.invoke(app, ["review", "--help"])
     assert result.exit_code == 0
-    assert "--target-ref" in result.stdout
-    assert "--model" in result.stdout
-    assert "--json" in result.stdout
-    assert "--output" in result.stdout
-    assert "--fail-on" in result.stdout
+    clean_stdout = strip_ansi(result.stdout)
+    assert "--target-ref" in clean_stdout
+    assert "--model" in clean_stdout
+    assert "--json" in clean_stdout
+    assert "--output" in clean_stdout
+    assert "--fail-on" in clean_stdout
 
 
 def test_cli_review_json_output():
