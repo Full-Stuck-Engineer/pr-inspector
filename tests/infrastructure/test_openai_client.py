@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import openai
 import pytest
+from pydantic import ValidationError
 
 from pr_inspector.domain.entities import FileDiff, PRReviewResult, RiskLevel
 from pr_inspector.domain.exceptions import ReviewExecutionError
@@ -68,3 +69,75 @@ def test_openai_reviewer_api_error_handling():
     ):
         with pytest.raises(ReviewExecutionError, match="LLM API request failed"):
             reviewer.review([FileDiff(file_path="src/main.py")])
+
+
+def test_openai_reviewer_fenced_reply_validation_error_handling():
+    reviewer = OpenAICompatibleLLMReviewer()
+    fenced_reply = '```json\n{"summary": "No issues.", "risk_level": "LOW", "issues": []}\n```'
+    validation_error: ValidationError | None = None
+    try:
+        PRReviewResult.model_validate_json(fenced_reply)
+    except ValidationError as val_err:
+        validation_error = val_err
+
+    assert validation_error is not None
+
+    with patch.object(
+        reviewer.client.beta.chat.completions,
+        "parse",
+        side_effect=validation_error,
+    ):
+        with pytest.raises(ReviewExecutionError) as exc_info:
+            reviewer.review([FileDiff(file_path="src/main.py")])
+
+        # Message must not leak the raw model reply or pydantic traceback
+        error_msg = str(exc_info.value)
+        assert fenced_reply not in error_msg
+        assert "LLM response failed to parse into PRReviewResult" in error_msg
+
+
+def test_openai_reviewer_fenced_reply_fallback_recovery():
+    fenced_content = '```json\n{"summary": "Recovered", "risk_level": "LOW", "issues": []}\n```'
+    mock_choice = MagicMock()
+    mock_choice.finish_reason = "stop"
+    mock_choice.message.parsed = None
+    mock_choice.message.content = fenced_content
+
+    mock_completion = MagicMock()
+    mock_completion.choices = [mock_choice]
+    mock_completion.usage.prompt_tokens = 50
+    mock_completion.usage.completion_tokens = 20
+
+    reviewer = OpenAICompatibleLLMReviewer()
+    with patch.object(
+        reviewer.client.beta.chat.completions,
+        "parse",
+        return_value=mock_completion,
+    ):
+        result, telemetry = reviewer.review([FileDiff(file_path="src/main.py")])
+
+        assert result.summary == "Recovered"
+        assert result.risk_level == RiskLevel.LOW
+        assert result.issues == []
+
+
+def test_openai_reviewer_unparsed_invalid_content():
+    mock_choice = MagicMock()
+    mock_choice.finish_reason = "stop"
+    mock_choice.message.parsed = None
+    mock_choice.message.content = "this is not json at all"
+
+    mock_completion = MagicMock()
+    mock_completion.choices = [mock_choice]
+
+    reviewer = OpenAICompatibleLLMReviewer()
+    with patch.object(
+        reviewer.client.beta.chat.completions,
+        "parse",
+        return_value=mock_completion,
+    ):
+        with pytest.raises(ReviewExecutionError) as exc_info:
+            reviewer.review([FileDiff(file_path="src/main.py")])
+
+        assert "this is not json at all" not in str(exc_info.value)
+        assert "LLM response failed to parse into PRReviewResult" in str(exc_info.value)
