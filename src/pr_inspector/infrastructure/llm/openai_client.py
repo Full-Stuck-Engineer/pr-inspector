@@ -37,6 +37,37 @@ risk_level to 'LOW'. Do NOT invent or hallucinate issues.
 """
 
 
+# The message for a reply that does not match the review schema. Stable, so callers can match it.
+SCHEMA_FAILURE_MESSAGE = (
+    "LLM response failed to parse into PRReviewResult "
+    "(reply was not valid structured output or JSON)"
+)
+
+
+class _SchemaViolation(ReviewExecutionError):
+    """The reply came back, but it does not match the review schema.
+
+    ``review`` retries once with the validation error. A second violation fails the review.
+    """
+
+    def __init__(self, validation_error: ValidationError) -> None:
+        super().__init__(SCHEMA_FAILURE_MESSAGE)
+        self.validation_error = validation_error
+
+
+def _schema_feedback(error: ValidationError) -> str:
+    """What to tell the model: each problem by field and rule, never the model's own values."""
+    problems = [
+        f"{'.'.join(str(part) for part in item['loc']) or 'reply'}: {item['msg']}"
+        for item in error.errors()[:5]
+    ]
+    return (
+        "Your previous reply did not match the required JSON schema: "
+        + "; ".join(problems)
+        + ". Reply again with one complete JSON object that has every required field."
+    )
+
+
 class OpenAICompatibleLLMReviewer:
     """LLM reviewer adapter compatible with Ollama, OpenAI, and Gemini APIs."""
 
@@ -84,8 +115,36 @@ class OpenAICompatibleLLMReviewer:
         ]
 
         start_time = time.perf_counter()
-        completion = self._call_with_retries(messages)
+        try:
+            completion, parsed_result = self._request_result(messages)
+        except _SchemaViolation as exc:
+            # One retry, naming what was wrong with the reply. A second violation fails the review.
+            messages.append({"role": "user", "content": _schema_feedback(exc.validation_error)})
+            completion, parsed_result = self._request_result(messages)
         latency_ms = (time.perf_counter() - start_time) * 1000
+
+        prompt_tokens = completion.usage.prompt_tokens if completion.usage else 0
+        completion_tokens = completion.usage.completion_tokens if completion.usage else 0
+
+        telemetry = TelemetryRecord(
+            model=self.model,
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+            latency_ms=round(latency_ms, 2),
+            timestamp=datetime.now(UTC).isoformat(),
+        )
+
+        return parsed_result, telemetry
+
+    def _request_result(
+        self, messages: list[dict]
+    ) -> "tuple[ParsedChatCompletion[PRReviewResult], PRReviewResult]":
+        """One request, read as a review: the completion, and its parsed result.
+
+        A reply that does not match the schema raises ``_SchemaViolation``, so ``review`` can
+        retry it. A truncated reply is never retried: the same diff would be truncated again.
+        """
+        completion = self._call_with_retries(messages)
 
         choice = completion.choices[0]
         if choice.finish_reason == "length":
@@ -106,25 +165,10 @@ class OpenAICompatibleLLMReviewer:
                 try:
                     parsed_result = PRReviewResult.model_validate_json(json_text)
                 except ValidationError as exc:
-                    raise ReviewExecutionError(
-                        "LLM response failed to parse into PRReviewResult "
-                        "(reply was not valid structured output or JSON)"
-                    ) from exc
+                    raise _SchemaViolation(exc) from exc
             else:
                 raise ReviewExecutionError("LLM response failed to parse into PRReviewResult")
-
-        prompt_tokens = completion.usage.prompt_tokens if completion.usage else 0
-        completion_tokens = completion.usage.completion_tokens if completion.usage else 0
-
-        telemetry = TelemetryRecord(
-            model=self.model,
-            input_tokens=prompt_tokens,
-            output_tokens=completion_tokens,
-            latency_ms=round(latency_ms, 2),
-            timestamp=datetime.now(UTC).isoformat(),
-        )
-
-        return parsed_result, telemetry
+        return completion, parsed_result
 
     def _call_with_retries(self, messages: list[dict]) -> "ParsedChatCompletion[PRReviewResult]":
         """Call the completions endpoint, retrying transient failures.
@@ -161,10 +205,7 @@ class OpenAICompatibleLLMReviewer:
                     raise ReviewExecutionError(f"LLM API request failed: {exc}") from exc
                 last_exc = exc
             except ValidationError as exc:
-                raise ReviewExecutionError(
-                    "LLM response failed to parse into PRReviewResult "
-                    "(reply was not valid structured output or JSON)"
-                ) from exc
+                raise _SchemaViolation(exc) from exc
             except openai.OpenAIError as exc:
                 raise ReviewExecutionError(f"LLM API request failed: {exc}") from exc
 
