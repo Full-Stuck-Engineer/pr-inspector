@@ -93,6 +93,19 @@ class Reranker(Protocol):
 
 
 @runtime_checkable
+class EmbeddingProvider(Protocol):
+    """Port for generating dense vector embeddings from text."""
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Compute embeddings for a batch of input texts."""
+        ...
+
+    def embed_query(self, query: str) -> list[float]:
+        """Compute embedding for a single search query."""
+        ...
+
+
+@runtime_checkable
 class ManifestStore(Protocol):
     """Port for persisting and loading the indexing manifest."""
 
