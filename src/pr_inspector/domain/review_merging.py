@@ -43,4 +43,7 @@ def merge_telemetry(records: Sequence[TelemetryRecord]) -> TelemetryRecord:
         output_tokens=sum(record.output_tokens for record in records),
         latency_ms=round(sum(record.latency_ms for record in records), 2),
         timestamp=records[-1].timestamp,
+        retrieved_chunks=sum(record.retrieved_chunks for record in records),
+        rerank_latency_ms=round(sum(record.rerank_latency_ms for record in records), 2),
+        context_tokens=sum(record.context_tokens for record in records),
     )

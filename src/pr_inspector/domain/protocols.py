@@ -127,3 +127,16 @@ class ManifestStore(Protocol):
     def save_manifest(self, manifest: IndexManifest) -> None:
         """Save updated manifest to persistent storage."""
         ...
+
+
+@runtime_checkable
+class ChunkStore(Protocol):
+    """Port for persisting and loading code chunks from storage."""
+
+    def load_chunks(self) -> list[CodeChunk]:
+        """Load stored chunks from storage."""
+        ...
+
+    def save_chunks(self, chunks: list[CodeChunk]) -> None:
+        """Persist chunks to storage."""
+        ...
