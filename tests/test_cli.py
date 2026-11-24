@@ -16,7 +16,7 @@ from pr_inspector.domain.entities import (
     RiskLevel,
     TelemetryRecord,
 )
-from pr_inspector.domain.exceptions import DiffExtractionError
+from pr_inspector.domain.exceptions import DiffExtractionError, ReviewExecutionError
 
 ANSI_ESCAPE_REGEX = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -205,6 +205,22 @@ def test_cli_review_error_exit_code():
         result = runner.invoke(app, ["review"])
         assert result.exit_code == 2
         assert "Review Error" in result.stdout
+
+
+def test_cli_review_fenced_reply_gives_exit_code_2_not_traceback():
+    mock_use_case = MagicMock()
+    mock_use_case.execute.side_effect = ReviewExecutionError(
+        "LLM response failed to parse into PRReviewResult "
+        "(reply was not valid structured output or JSON)"
+    )
+
+    with patch("pr_inspector.cli.create_review_use_case", return_value=mock_use_case):
+        result = runner.invoke(app, ["review"])
+        assert result.exit_code == 2
+        assert "Review Error" in result.stdout
+        assert "Traceback" not in result.stdout
+        assert "ValidationError" not in result.stdout
+        assert "json_invalid" not in result.stdout
 
 
 def test_cli_review_json_output_is_lossless_for_long_and_markup_like_text():
