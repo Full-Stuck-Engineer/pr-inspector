@@ -150,3 +150,37 @@ def test_cli_review_error_exit_code():
         result = runner.invoke(app, ["review"])
         assert result.exit_code == 2
         assert "Review Error" in result.stdout
+
+
+def test_cli_review_json_output_is_lossless_for_long_and_markup_like_text():
+    # Longer than a terminal line, and containing tokens that look like Rich markup.
+    summary = (
+        "Reads config[0] and arr[i], then prints [red]colors[/red]. "
+        + "This sentence makes the summary longer than a terminal line. " * 6
+    ).strip()
+    suggested_fix = "Use [bold]parameterized queries[/bold] instead of string formatting. " * 3
+    mock_result = PRReviewResult(
+        summary=summary,
+        risk_level=RiskLevel.HIGH,
+        issues=[
+            ReviewIssue(
+                file_path="src/db.py",
+                line_number=45,
+                severity=RiskLevel.HIGH,
+                title="SQL Injection",
+                description="Unsanitized query concatenation. " * 5,
+                suggested_fix=suggested_fix,
+            )
+        ],
+    )
+    mock_use_case = MagicMock()
+    mock_use_case.execute.return_value = (mock_result, None)
+
+    with patch("pr_inspector.cli.create_review_use_case", return_value=mock_use_case):
+        result = runner.invoke(app, ["review", "--json", "--fail-on", "CRITICAL"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["summary"] == summary
+    assert data["issues"][0]["suggested_fix"] == suggested_fix
+    assert PRReviewResult.model_validate(data) == mock_result
