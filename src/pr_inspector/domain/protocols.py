@@ -24,7 +24,9 @@ class DiffProvider(Protocol):
 class LLMReviewer(Protocol):
     """Port for performing automated PR review using an LLM."""
 
-    def review(self, diffs: list[FileDiff]) -> tuple[PRReviewResult, TelemetryRecord]:
+    def review(
+        self, diffs: list[FileDiff], context: str | None = None
+    ) -> tuple[PRReviewResult, TelemetryRecord]:
         """Analyze diffs and produce structured review and telemetry."""
         ...
 
@@ -102,6 +104,15 @@ class EmbeddingProvider(Protocol):
 
     def embed_query(self, query: str) -> list[float]:
         """Compute embedding for a single search query."""
+        ...
+
+
+@runtime_checkable
+class ContextRetriever(Protocol):
+    """Port for retrieving and formatting codebase context for diff review."""
+
+    def retrieve_context_for_diffs(self, diffs: list[FileDiff], top_k: int = 5) -> str:
+        """Analyze diffs, retrieve surrounding codebase context, and format as markdown."""
         ...
 
 

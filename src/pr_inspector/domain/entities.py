@@ -35,6 +35,10 @@ class ReviewIssue(BaseModel):
     title: str = Field(description="Brief headline of the problem")
     description: str = Field(description="Detailed explanation of the defect or security flaw")
     suggested_fix: str | None = Field(default=None, description="Recommended remediation")
+    cited_files: list[str] = Field(
+        default_factory=list,
+        description="External codebase files cited as evidence or reference for this issue",
+    )
 
 
 class PRReviewResult(BaseModel):
@@ -43,6 +47,10 @@ class PRReviewResult(BaseModel):
     summary: str = Field(description="High-level assessment of the pull request changes")
     risk_level: RiskLevel = Field(description="Aggregated risk severity")
     issues: list[ReviewIssue] = Field(default_factory=list, description="List of identified issues")
+    cited_files: list[str] = Field(
+        default_factory=list,
+        description="Source files from codebase context cited in the review report",
+    )
 
     @model_validator(mode="after")
     def _align_risk_level_with_issues(self) -> "PRReviewResult":
