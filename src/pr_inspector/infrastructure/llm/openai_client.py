@@ -8,7 +8,8 @@ from datetime import UTC, datetime
 
 import openai
 from openai import OpenAI
-from openai.types.chat import ParsedChatCompletion
+from openai.lib._parsing import type_to_response_format_param
+from openai.types.chat import ChatCompletion
 from pydantic import ValidationError
 
 from pr_inspector.domain.entities import FileDiff, PRReviewResult, TelemetryRecord
@@ -17,6 +18,10 @@ from pr_inspector.domain.exceptions import ReviewExecutionError
 # Matches a single Markdown code fence that wraps the whole reply, e.g.
 # ```json\n{...}\n``` or ```\n{...}\n```. Only the innermost JSON text is kept.
 _CODE_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*\n([\s\S]*?)\n\s*```\s*$")
+
+# The structured-output request for a review, built by the SDK helper that its own ``parse``
+# uses, so the request is unchanged. A test pins it against ``parse``.
+REVIEW_RESPONSE_FORMAT = type_to_response_format_param(PRReviewResult)
 
 # Transient failures worth retrying: rate limits, timeouts, dropped connections.
 RETRYABLE_ERRORS = (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError)
@@ -147,13 +152,12 @@ class OpenAICompatibleLLMReviewer:
 
         return parsed_result, telemetry
 
-    def _request_result(
-        self, messages: list[dict]
-    ) -> "tuple[ParsedChatCompletion[PRReviewResult], PRReviewResult]":
+    def _request_result(self, messages: list[dict]) -> tuple[ChatCompletion, PRReviewResult]:
         """One request, read as a review: the completion, and its parsed result.
 
         A reply that does not match the schema raises ``_SchemaViolation``, so ``review`` can
-        retry it. A truncated reply is never retried: the same diff would be truncated again.
+        retry it. That includes an empty or missing reply. A truncated reply is never retried:
+        the same diff would be truncated again.
         """
         completion = self._call_with_retries(messages)
 
@@ -164,24 +168,18 @@ class OpenAICompatibleLLMReviewer:
                 "Retry with a smaller diff or fewer files."
             )
 
-        parsed_result = choice.message.parsed
-        if parsed_result is None:
-            # Some models (especially local ones via Ollama) ignore the structured-output
-            # schema and return plain text. Try to recover by stripping a Markdown code fence
-            # before handing the text to the pydantic parser.
-            raw_content = choice.message.content
-            if isinstance(raw_content, str):
-                fence_match = _CODE_FENCE_RE.match(raw_content)
-                json_text = fence_match.group(1) if fence_match else raw_content
-                try:
-                    parsed_result = PRReviewResult.model_validate_json(json_text)
-                except ValidationError as exc:
-                    raise _SchemaViolation(exc) from exc
-            else:
-                raise ReviewExecutionError("LLM response failed to parse into PRReviewResult")
+        # Some models wrap their JSON in a Markdown code fence despite the schema, so a single
+        # fence is stripped before the reply is validated.
+        raw_content = choice.message.content if isinstance(choice.message.content, str) else ""
+        fence_match = _CODE_FENCE_RE.match(raw_content)
+        json_text = fence_match.group(1) if fence_match else raw_content
+        try:
+            parsed_result = PRReviewResult.model_validate_json(json_text)
+        except ValidationError as exc:
+            raise _SchemaViolation(exc) from exc
         return completion, parsed_result
 
-    def _call_with_retries(self, messages: list[dict]) -> "ParsedChatCompletion[PRReviewResult]":
+    def _call_with_retries(self, messages: list[dict]) -> ChatCompletion:
         """Call the completions endpoint, retrying transient failures.
 
         Rate limits, timeouts and connection errors are retried with
@@ -189,19 +187,21 @@ class OpenAICompatibleLLMReviewer:
         should not fail the whole review. Other 4xx errors are the caller's
         mistake (bad key, unsupported parameter) and fail immediately.
 
-        ``LengthFinishReasonError`` never reaches the ``finish_reason`` check
-        in ``review``: the SDK raises it instead of returning a completion,
-        so it is wrapped here. The remaining ``OpenAIError`` fallback catches
-        the rest of the SDK's error surface (content-filter refusals, response
-        validation) so nothing escapes as a raw traceback.
+        The request asks for the review schema exactly as the SDK's ``parse`` does, but the
+        reply is validated in ``_request_result``, not by the SDK: the SDK's own validation
+        rejects a fenced reply before it can be read (#50). ``LengthFinishReasonError`` and
+        ``ValidationError`` are still wrapped, in case an SDK raises them. The remaining
+        ``OpenAIError`` fallback catches the rest of the SDK's error surface (content-filter
+        refusals, response validation) so nothing escapes as a raw traceback.
         """
         last_exc: Exception | None = None
         for attempt in range(MAX_ATTEMPTS):
             try:
-                return self.client.beta.chat.completions.parse(
+                return self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
-                    response_format=PRReviewResult,
+                    response_format=REVIEW_RESPONSE_FORMAT,
+                    stream=False,
                     temperature=0.0,
                 )
             except openai.LengthFinishReasonError as exc:
