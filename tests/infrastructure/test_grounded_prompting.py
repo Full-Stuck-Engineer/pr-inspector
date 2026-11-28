@@ -40,31 +40,46 @@ def _make_diff() -> FileDiff:
     )
 
 
+def _mock_completion(
+    result: PRReviewResult,
+    prompt_tokens: int = 100,
+    completion_tokens: int = 20,
+    *,
+    fenced: bool = False,
+) -> MagicMock:
+    payload = result.model_dump_json()
+    if fenced:
+        payload = f"```json\n{payload}\n```"
+    mock_choice = MagicMock()
+    mock_choice.finish_reason = "stop"
+    mock_choice.message.content = payload
+    mock_completion = MagicMock()
+    mock_completion.choices = [mock_choice]
+    mock_completion.usage.prompt_tokens = prompt_tokens
+    mock_completion.usage.completion_tokens = completion_tokens
+    return mock_completion
+
+
 def test_reviewer_injects_context_into_prompt():
     mock_result = PRReviewResult(
         summary="Context-aware review",
         risk_level=RiskLevel.LOW,
         issues=[],
     )
-    mock_choice = MagicMock()
-    mock_choice.message.parsed = mock_result
-    mock_completion = MagicMock()
-    mock_completion.choices = [mock_choice]
-    mock_completion.usage.prompt_tokens = 100
-    mock_completion.usage.completion_tokens = 20
+    mock_completion = _mock_completion(mock_result)
 
     reviewer = OpenAICompatibleLLMReviewer()
     with patch.object(
-        reviewer.client.beta.chat.completions,
-        "parse",
+        reviewer.client.chat.completions,
+        "create",
         return_value=mock_completion,
-    ) as mock_parse:
+    ) as mock_create:
         context_block = "### src/utils.py\n```python\ndef helper():\n    return 42\n```"
         result, _ = reviewer.review([_make_diff()], context=context_block)
 
         assert result == mock_result
-        assert mock_parse.called
-        messages = mock_parse.call_args[1]["messages"]
+        assert mock_create.called
+        messages = mock_create.call_args[1]["messages"]
         assert len(messages) == 2
         assert messages[0]["role"] == "system"
         assert "cited_files" in messages[0]["content"]
@@ -76,27 +91,22 @@ def test_reviewer_injects_context_into_prompt():
 
 def test_reviewer_omits_context_when_none_or_blank():
     mock_result = PRReviewResult(summary="OK", risk_level=RiskLevel.LOW, issues=[])
-    mock_choice = MagicMock()
-    mock_choice.message.parsed = mock_result
-    mock_completion = MagicMock()
-    mock_completion.choices = [mock_choice]
-    mock_completion.usage.prompt_tokens = 50
-    mock_completion.usage.completion_tokens = 10
+    mock_completion = _mock_completion(mock_result, prompt_tokens=50, completion_tokens=10)
 
     reviewer = OpenAICompatibleLLMReviewer()
     with patch.object(
-        reviewer.client.beta.chat.completions,
-        "parse",
+        reviewer.client.chat.completions,
+        "create",
         return_value=mock_completion,
-    ) as mock_parse:
+    ) as mock_create:
         # Test None
         reviewer.review([_make_diff()], context=None)
-        messages_none = mock_parse.call_args[1]["messages"]
+        messages_none = mock_create.call_args[1]["messages"]
         assert "## Relevant Codebase Context" not in messages_none[1]["content"]
 
         # Test blank string
         reviewer.review([_make_diff()], context="   \n  ")
-        messages_blank = mock_parse.call_args[1]["messages"]
+        messages_blank = mock_create.call_args[1]["messages"]
         assert "## Relevant Codebase Context" not in messages_blank[1]["content"]
 
 
@@ -117,22 +127,49 @@ def test_reviewer_parses_cited_files_from_completion():
         ],
         cited_files=["src/caller.py", "src/types.py"],
     )
-    mock_choice = MagicMock()
-    mock_choice.message.parsed = mock_result
-    mock_completion = MagicMock()
-    mock_completion.choices = [mock_choice]
-    mock_completion.usage.prompt_tokens = 150
-    mock_completion.usage.completion_tokens = 60
+    mock_completion = _mock_completion(mock_result, prompt_tokens=150, completion_tokens=60)
 
     reviewer = OpenAICompatibleLLMReviewer()
     with patch.object(
-        reviewer.client.beta.chat.completions,
-        "parse",
+        reviewer.client.chat.completions,
+        "create",
         return_value=mock_completion,
     ):
         result, _ = reviewer.review([_make_diff()], context="### src/caller.py\n...")
 
         assert result.cited_files == ["src/caller.py", "src/types.py"]
+        assert result.issues[0].cited_files == ["src/caller.py"]
+
+
+def test_reviewer_parses_fenced_reply_with_cited_files():
+    mock_result = PRReviewResult(
+        summary="Grounded review inside markdown fence",
+        risk_level=RiskLevel.MEDIUM,
+        issues=[
+            ReviewIssue(
+                file_path="src/calc.py",
+                line_number=2,
+                severity=RiskLevel.MEDIUM,
+                title="Type mismatch",
+                description="Caller passes Decimal",
+                cited_files=["src/caller.py"],
+            )
+        ],
+        cited_files=["src/caller.py"],
+    )
+    mock_completion = _mock_completion(mock_result, fenced=True)
+
+    reviewer = OpenAICompatibleLLMReviewer()
+    with patch.object(
+        reviewer.client.chat.completions,
+        "create",
+        return_value=mock_completion,
+    ) as mock_create:
+        result, _ = reviewer.review([_make_diff()], context="### src/caller.py\n...")
+
+        assert mock_create.call_count == 1
+        assert result == mock_result
+        assert result.cited_files == ["src/caller.py"]
         assert result.issues[0].cited_files == ["src/caller.py"]
 
 
