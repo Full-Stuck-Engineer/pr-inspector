@@ -27,9 +27,9 @@ def _completion(
     choice = MagicMock()
     choice.finish_reason = finish_reason
     if omit_parsed:
-        choice.message.parsed = None
+        choice.message.content = None
     else:
-        choice.message.parsed = parsed if parsed is not None else _parsed_result()
+        choice.message.content = (parsed or _parsed_result()).model_dump_json()
     completion = MagicMock()
     completion.choices = [choice]
     completion.usage.prompt_tokens = 100
@@ -52,53 +52,53 @@ class TestRetries:
     def test_rate_limit_is_retried_then_succeeds(self):
         reviewer = _reviewer()
         with patch.object(
-            reviewer.client.beta.chat.completions,
-            "parse",
+            reviewer.client.chat.completions,
+            "create",
             side_effect=[
                 openai.RateLimitError(message="429", response=MagicMock(), body=None),
                 _completion(),
             ],
-        ) as mock_parse:
+        ) as mock_create:
             result, _telemetry = reviewer.review([FileDiff(file_path="a.py")])
 
         assert result.risk_level is RiskLevel.LOW
-        assert mock_parse.call_count == 2
+        assert mock_create.call_count == 2
 
     def test_connection_error_is_retried_then_succeeds(self):
         reviewer = _reviewer()
         with patch.object(
-            reviewer.client.beta.chat.completions,
-            "parse",
+            reviewer.client.chat.completions,
+            "create",
             side_effect=[openai.APIConnectionError(request=MagicMock()), _completion()],
-        ) as mock_parse:
+        ) as mock_create:
             reviewer.review([FileDiff(file_path="a.py")])
 
-        assert mock_parse.call_count == 2
+        assert mock_create.call_count == 2
 
     def test_server_error_is_retried(self):
         reviewer = _reviewer()
         response = MagicMock()
         response.status_code = 503
         with patch.object(
-            reviewer.client.beta.chat.completions,
-            "parse",
+            reviewer.client.chat.completions,
+            "create",
             side_effect=[openai.APIStatusError("503", response=response, body=None), _completion()],
-        ) as mock_parse:
+        ) as mock_create:
             reviewer.review([FileDiff(file_path="a.py")])
 
-        assert mock_parse.call_count == 2
+        assert mock_create.call_count == 2
 
     def test_persistent_rate_limit_raises_after_max_attempts(self):
         reviewer = _reviewer()
         with patch.object(
-            reviewer.client.beta.chat.completions,
-            "parse",
+            reviewer.client.chat.completions,
+            "create",
             side_effect=openai.RateLimitError(message="429", response=MagicMock(), body=None),
-        ) as mock_parse:
+        ) as mock_create:
             with pytest.raises(ReviewExecutionError, match="after 3 attempts"):
                 reviewer.review([FileDiff(file_path="a.py")])
 
-        assert mock_parse.call_count == 3
+        assert mock_create.call_count == 3
 
     def test_client_error_fails_immediately_without_retry(self):
         """A 4xx other than 429 is a caller mistake; retrying cannot help."""
@@ -106,14 +106,14 @@ class TestRetries:
         response = MagicMock()
         response.status_code = 401
         with patch.object(
-            reviewer.client.beta.chat.completions,
-            "parse",
+            reviewer.client.chat.completions,
+            "create",
             side_effect=openai.APIStatusError("401", response=response, body=None),
-        ) as mock_parse:
+        ) as mock_create:
             with pytest.raises(ReviewExecutionError, match="LLM API request failed"):
                 reviewer.review([FileDiff(file_path="a.py")])
 
-        assert mock_parse.call_count == 1
+        assert mock_create.call_count == 1
 
     def test_backoff_grows_between_attempts(self):
         sleeps = []
@@ -121,8 +121,8 @@ class TestRetries:
         with (
             patch.object(openai_client.time, "sleep", side_effect=lambda s: sleeps.append(s)),
             patch.object(
-                reviewer.client.beta.chat.completions,
-                "parse",
+                reviewer.client.chat.completions,
+                "create",
                 side_effect=[
                     openai.APIConnectionError(request=MagicMock()),
                     openai.APIConnectionError(request=MagicMock()),
@@ -140,8 +140,8 @@ class TestTruncation:
     def test_truncated_response_raises_explicit_error(self):
         reviewer = _reviewer()
         with patch.object(
-            reviewer.client.beta.chat.completions,
-            "parse",
+            reviewer.client.chat.completions,
+            "create",
             return_value=_completion(finish_reason="length", omit_parsed=True),
         ):
             with pytest.raises(ReviewExecutionError, match="truncated"):
@@ -150,8 +150,8 @@ class TestTruncation:
     def test_truncation_error_is_actionable(self):
         reviewer = _reviewer()
         with patch.object(
-            reviewer.client.beta.chat.completions,
-            "parse",
+            reviewer.client.chat.completions,
+            "create",
             return_value=_completion(finish_reason="length", omit_parsed=True),
         ):
             with pytest.raises(ReviewExecutionError, match="smaller diff"):
@@ -160,8 +160,8 @@ class TestTruncation:
     def test_unparseable_non_truncated_response_still_raises_parse_error(self):
         reviewer = _reviewer()
         with patch.object(
-            reviewer.client.beta.chat.completions,
-            "parse",
+            reviewer.client.chat.completions,
+            "create",
             return_value=_completion(finish_reason="stop", omit_parsed=True),
         ):
             with pytest.raises(ReviewExecutionError, match="failed to parse"):
@@ -180,8 +180,8 @@ class TestSdkTruncationError:
             completion=_completion(finish_reason="length", omit_parsed=True)
         )
         with patch.object(
-            reviewer.client.beta.chat.completions,
-            "parse",
+            reviewer.client.chat.completions,
+            "create",
             side_effect=exc,
         ):
             with pytest.raises(ReviewExecutionError, match="truncated"):
@@ -194,14 +194,14 @@ class TestSdkTruncationError:
             completion=_completion(finish_reason="length", omit_parsed=True)
         )
         with patch.object(
-            reviewer.client.beta.chat.completions,
-            "parse",
+            reviewer.client.chat.completions,
+            "create",
             side_effect=exc,
-        ) as mock_parse:
+        ) as mock_create:
             with pytest.raises(ReviewExecutionError, match="truncated"):
                 reviewer.review([FileDiff(file_path="a.py")])
 
-        assert mock_parse.call_count == 1
+        assert mock_create.call_count == 1
 
 
 class TestUnexpectedSdkErrors:
@@ -211,8 +211,8 @@ class TestUnexpectedSdkErrors:
     def test_content_filter_refusal_is_wrapped(self):
         reviewer = _reviewer()
         with patch.object(
-            reviewer.client.beta.chat.completions,
-            "parse",
+            reviewer.client.chat.completions,
+            "create",
             side_effect=openai.ContentFilterFinishReasonError(),
         ):
             with pytest.raises(ReviewExecutionError, match="LLM API request failed"):
@@ -223,8 +223,8 @@ class TestUnexpectedSdkErrors:
         response = MagicMock()
         response.status_code = 200
         with patch.object(
-            reviewer.client.beta.chat.completions,
-            "parse",
+            reviewer.client.chat.completions,
+            "create",
             side_effect=openai.APIResponseValidationError(
                 message="did not match schema", response=response, body=None
             ),
